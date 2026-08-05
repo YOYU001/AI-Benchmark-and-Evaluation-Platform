@@ -1,0 +1,24 @@
+# secrets / environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+
+# active/ 是工作中的暫存區（research/execution/config/temp），內容不進版控，
+# 只保留資料夾骨架（.gitkeep）；定案的東西要手動搬到 results/ 或 docs/
+active/**
+!active/**/
+!active/**/.gitkeep

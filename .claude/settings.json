@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/secrets.json)",
+      "Read(**/.ssh/**)"
+    ],
+    "ask": [
+      "Bash(npm install*)",
+      "Bash(npm i *)",
+      "Bash(npm add*)",
+      "Bash(npx *)",
+      "Bash(pip install*)",
+      "Bash(pip3 install*)",
+      "Bash(pnpm add*)",
+      "Bash(yarn add*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": false,
+    "credentials": {
+      "files": [
+        { "path": ".env", "mode": "deny" },
+        { "path": ".env.local", "mode": "deny" }
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "registry.npmjs.org",
+        "pypi.org",
+        "files.pythonhosted.org"
+      ]
+    }
+  }
+}
