@@ -59,7 +59,7 @@ skill 的檔案格式規定如下（放在 `.claude/skills/<skill-name>/`）：
 - **Claude Code**：負責發起討論、收集其他三方的意見、統整分析、最終給使用者結論與下一步建議。
 - **codex CLI**：非互動呼叫方式為 `codex exec "prompt"`。
 - **copilot CLI**：非互動呼叫方式為 `copilot -p "prompt" --allow-all-tools`（非互動模式必須加 `--allow-all-tools`，否則會卡在權限確認）。
-- **agy CLI（Antigravity）**：非互動呼叫方式為 `agy --print "prompt"`。**目前這支執行檔不在系統 PATH 裡**，需要用完整路徑呼叫：`C:\Users\User\AppData\Local\agy\bin\agy.exe --print "prompt"`（除非使用者之後自行把它加入 PATH）。
+- **agy CLI（Antigravity）**：非互動呼叫方式為 `agy --print "prompt"`（已加入系統 PATH，2026-08-05 重開機後生效並實測確認，不需要再用完整路徑）。
 
 流程：
 

@@ -43,7 +43,7 @@ active/                                        # 工作中的暫存區，不進�
 
 ## 這個 repo 的工作慣例
 
-- **每次開始工作前，先閱讀 `PROGRESS.md`**，了解目前進度與上次停在哪裡；每次工作結束或有階段性產出時，在該檔案新增一筆紀錄（日期 + 做了什麼 + 下一步）。
+- **每次開始工作前，先閱讀 `PROGRESS.md` 與 `TODO.md`**：`PROGRESS.md` 了解目前進度與上次停在哪裡，工作結束或有階段性產出時新增一筆紀錄（日期 + 做了什麼 + 下一步）；`TODO.md` 是跨對話留存的待辦清單（打勾框樣式），完成項目要打勾並保留刪除線，不要直接刪除整行，新的待辦事項也隨時加進對應區塊。
 - **`docs/00_phase1_2_learning_plan.md` 是「現在要做什麼」的最終依據**；`NVIDIA_AI_EVALUATION_ROADMAP.md` 則是長期地圖。若兩者看似衝突，近期工作以 phase learning plan 為準。
 - **`datasets/energyops_test_questions.json` 是 test oracle**（見其 `_meta.purpose`）：一旦 retrieval/citation 測試已經在使用它，就不要隨意修改題目或預期答案——修改它要當成變更 ground truth，而不是一般的資料修正。注意其 `verification_tiers` 欄位：只有 `verified` 的題目可以拿來算正式的 accuracy metric；`partially_verified` 僅能用於定性觀察；`unverified` 是行為面的判斷（系統是否恰當地拒答），不是事實比對。
 - 執行 Phase 2 的付費 API 比較（含 LLM-as-a-Judge 那一次呼叫）之前，計畫要求先用 MVP_V1 既有的 `embed-cost-estimate` skill 估算花費，不要盲跑。

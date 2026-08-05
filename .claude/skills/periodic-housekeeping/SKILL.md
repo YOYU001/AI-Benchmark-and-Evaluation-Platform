@@ -1,30 +1,30 @@
 ---
 name: periodic-housekeeping
-description: 定期檢查並整理 CLAUDE.md、AGENTS.md、PROGRESS.md 的長度，避免內容膨脹到影響 Claude Code 的判讀準確率；規則型文件用「修剪」處理，日誌型文件用「歸檔」處理。
+description: 定期檢查並整理 CLAUDE.md、AGENTS.md、PROGRESS.md、README.md、TODO.md 的長度（門檻 150 行），避免內容膨脹到影響 Claude Code 的判讀準確率；規則型文件用「修剪」處理、日誌型文件用「歸檔」處理、待辦清單型文件用「移除已完成項目」處理。
 ---
 
 # Periodic Housekeeping
 
 ## 用途
 
-`CLAUDE.md`、`AGENTS.md`、`PROGRESS.md` 會隨著專案進行持續增長。官方建議每份檔案控制在 **200 行以內**，超過會吃掉更多 context、降低指令遵從度。這個 skill 用來定期檢查這三份檔案的長度，並依「規則型文件」跟「日誌型文件」用不同方式整理，讓它們維持精簡。
+`CLAUDE.md`、`AGENTS.md`、`PROGRESS.md`、`README.md`、`TODO.md` 會隨著專案進行持續增長。這個專案設定的門檻是**每份檔案 150 行以內**（比官方建議的 200 行更嚴格，是使用者自訂的標準），超過會吃掉更多 context、降低指令遵從度。這個 skill 用來定期檢查這五份檔案的長度，並依文件性質分三類用不同方式整理，讓它們維持精簡。
 
 ## 何時觸發
 
-- 使用者明確要求「整理一下 CLAUDE.md/AGENTS.md/PROGRESS.md」、「幫我做 housekeeping」之類的請求。
+- 使用者明確要求「整理一下 CLAUDE.md/AGENTS.md/PROGRESS.md」之類的請求，或直接說「幫我做 housekeeping」。
 - 一個大 Phase 或段落性里程碑結束時，可以主動提醒使用者是否要跑一次檢查（不要沒問過就自己動手整理）。
 
 ## 使用方式
 
-1. 執行 `scripts/check_line_counts.py`，會印出 `CLAUDE.md`、`AGENTS.md`、`PROGRESS.md` 目前的行數，並標示哪些超過 200 行門檻。
-2. 依檢查結果分流處理：
+1. 執行 `scripts/check_line_counts.py`，會印出五份檔案目前的行數，並標示哪些超過 150 行門檻。
+2. 依檔案性質分三類處理：
 
-### 情境 A：`CLAUDE.md` 或 `AGENTS.md` 超過門檻（規則型文件 → 修剪）
+### 情境 A：`CLAUDE.md`／`AGENTS.md`／`README.md` 超過門檻（規則說明型文件 → 修剪）
 
-這兩份是「規則型」文件，不能用機械化的方式砍內容，需要 Claude 自己讀過一遍、用判斷力修剪：
+這三份是「規則說明型」文件，不能用機械化的方式砍內容，需要 Claude 自己讀過一遍、用判斷力修剪：
 
 - **可以砍**：可以從程式碼／專案結構直接推導出來的內容（例如資料夾結構、套件清單這種一看就知道的東西）。
-- **不能砍**：陷阱、理由（WHY）、非標準慣例、之前踩過的坑——這些是光看程式碼猜不出來的東西，也是這兩份文件存在的意義。
+- **不能砍**：陷阱、理由（WHY）、非標準慣例、之前踩過的坑——這些是光看程式碼猜不出來的東西，也是這些文件存在的意義。
 - 修剪完的結果**一定要先給使用者看過、確認之後才套用**，不能自己直接覆寫檔案。這是規則型文件，內容本身就是使用者要求的行為準則，擅自刪減等於片面改變雙方約定。
 
 ### 情境 B：`PROGRESS.md` 超過門檻（日誌型文件 → 歸檔，不是修剪）
@@ -35,12 +35,20 @@ description: 定期檢查並整理 CLAUDE.md、AGENTS.md、PROGRESS.md 的長度
 2. `PROGRESS.md` 開頭會自動加上一行提示：「更早的紀錄請見 `PROGRESS_ARCHIVE.md`」。
 3. 執行前**先跟使用者確認**要保留最近幾筆／幾天的紀錄，不要用預設值默默執行。
 
+### 情境 C：`TODO.md` 超過門檻（待辦清單型文件 → 移除已完成項目，不是歸檔也不是修剪）
+
+`TODO.md` 是打勾框樣式的待辦清單，跟 `PROGRESS.md` 不一樣的地方在於它**不是照時間序排列的歷史紀錄**，是「現在還有效」的清單，所以處理方式也不同：
+
+1. 先看有多少項目已經打勾（`- [x]`）——這些是已完成、只是還留著當紀錄的項目。
+2. 跟使用者確認可不可以把已完成項目整批移除（不是搬去別的檔案歸檔，因為完成的待辦事項本身沒有繼續保留的必要，`PROGRESS.md` 才是真正的歷史紀錄；如果使用者想保留完成紀錄，才建議連同完成日期一起搬一筆到 `PROGRESS.md`，而不是另外建一個 `TODO_ARCHIVE.md`）。
+3. 目前沒有自動化腳本處理這一類，因為判斷「這個已完成項目要不要保留紀錄」需要人工確認，不是機械化規則，做法比照情境 A 的修剪原則。
+
 ## 檔案
 
-- `scripts/check_line_counts.py`：檢查三份檔案目前行數，回報是否超過 200 行門檻。
+- `scripts/check_line_counts.py`：檢查五份檔案目前行數，回報是否超過 150 行門檻。
 - `scripts/archive_progress.py`：把 `PROGRESS.md` 裡較舊的日期區塊搬到 `PROGRESS_ARCHIVE.md`。
 
 ## 注意事項
 
-- 這個 skill 不會自動、無聲地修改任何檔案內容——`check_line_counts.py` 只讀不寫；`archive_progress.py` 會寫入檔案，但執行前一定要先跟使用者確認範圍。
-- `CLAUDE.md`／`AGENTS.md` 的修剪永遠需要 Claude 人工判斷「什麼該留、什麼該砍」，這個 skill 不提供、也不應該提供自動化的修剪腳本。
+- 這個 skill 不會自動、無聲地修改任何檔案內容——`check_line_counts.py` 只讀不寫；`archive_progress.py` 會寫入檔案，但執行前一定要先跟使用者確認範圍；`TODO.md` 的整理目前完全仰賴人工判斷，沒有腳本。
+- `CLAUDE.md`／`AGENTS.md`／`README.md` 的修剪永遠需要 Claude 人工判斷「什麼該留、什麼該砍」，這個 skill 不提供、也不應該提供自動化的修剪腳本。

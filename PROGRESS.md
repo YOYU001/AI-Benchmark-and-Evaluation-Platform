@@ -52,10 +52,7 @@
   - 本檔（`PROGRESS.md`）本身的落差（漏記工作、過時待辦、denyRead 範圍描述不精確）一併修正。
   - `results/` 補上 `.gitkeep`（原本是空資料夾、未被 git 追蹤，但多份文件已把它當既有結構在引用）。
   - `archive_progress.py` 重複執行會累積重複提示行的小 bug，待修。
-- 未完成／待辦：
-  - `.env` 內容使用者已自行填入，之後若需要除錯要用「是否存在／長度」的方式確認，不能直接讀取內容。
-  - `agy` 加入 PATH 一事使用者已知道方法（登出重登入或重開機），等手邊另一個專案跑完再處理，之後要回頭把 `AGENTS.md` 裡 agy 的呼叫方式從完整路徑改回簡短的 `agy`。
-  - `results/` 底下依 Phase + 日期分子資料夾的命名規則，討論過方向但尚未實際建立/套用。
-  - ~~`.claude/rules/` 的 `paths` frontmatter 實際生效與否~~ **已確認生效（`python.md`、`sql.md` 都測過）**：派完全沒看過本對話的全新 subagent，只在 prompt 裡提到一個 `.py`／`.sql` 路徑（檔案實際都不存在），兩次都回報收到對應的 `system-reminder` 區塊、附上規則檔逐字內容並正確標註來源路徑——連檔案都沒有真的被成功讀到，光是路徑文字出現就觸發了規則注入。證明 `paths` 機制不只是文件上寫的，是真的在運作，而且觸發條件比預期敏感（不需要真的成功存取到匹配的檔案）。
-  - `archive_progress.py` 的重複提示行 bug 已修正並重新測試通過（連續執行兩次不再重複）。
-  - 本次所有修正（含這筆 PROGRESS.md 更新）尚未 commit。
+- commit `d99cce6`：`.claude/agents/`、`.claude/rules/`、`.claude/skills/periodic-housekeeping/` 全數進版控，含 QA 審查後的 10 項修正。
+- 建立 `TODO.md`：跨對話留存的打勾框樣式待辦清單，跟 `PROGRESS.md`（歷史紀錄）分工——`PROGRESS.md` 記錄「做過什麼」，`TODO.md` 記錄「還沒做的事」。`CLAUDE.md` 已更新為每次開始工作前要同時讀 `PROGRESS.md` 與 `TODO.md`。之後新的待辦事項改記到 `TODO.md`，不再堆在這裡。
+- `agy` 加入 PATH：使用者重開機後確認生效（`agy --version` 可直接執行），`AGENTS.md` 呼叫方式已從完整路徑改回簡短的 `agy`，`TODO.md` 該項已打勾。
+- `.env` 內容使用者已自行填入，之後若需要除錯要用「是否存在／長度」的方式確認，不能直接讀取內容（持續性規則，不是待辦事項）。

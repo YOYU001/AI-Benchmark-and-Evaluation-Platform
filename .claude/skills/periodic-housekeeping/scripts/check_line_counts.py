@@ -1,4 +1,5 @@
-"""Report line counts for CLAUDE.md, AGENTS.md, PROGRESS.md against the 200-line guideline.
+"""Report line counts for CLAUDE.md, AGENTS.md, PROGRESS.md, README.md, TODO.md
+against the project's 150-line guideline.
 
 Usage:
     python check_line_counts.py [project_root]
@@ -12,8 +13,8 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-LINE_LIMIT = 200
-TARGET_FILES = ["CLAUDE.md", "AGENTS.md", "PROGRESS.md"]
+LINE_LIMIT = 150
+TARGET_FILES = ["CLAUDE.md", "AGENTS.md", "PROGRESS.md", "README.md", "TODO.md"]
 
 
 def count_lines(path: Path) -> int:
