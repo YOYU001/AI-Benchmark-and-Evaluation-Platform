@@ -21,7 +21,7 @@
 .claude/
   settings.json                                # 權限與 sandbox 設定（deny 讀取 .env 系列、安裝套件要確認等）
   agents/                                       # 自訂 subagent：QA.md、RESEARCH.md、CODE_REVIEW.md
-  skills/                                       # 自訂 skill，格式為 <name>/SKILL.md + scripts/
+  skills/                                       # 自訂 skill，格式為 <name>/SKILL.md + scripts/（periodic-housekeeping、api-cost-estimate）
   rules/                                        # 路徑限定規則（paths frontmatter），例如 python.md、sql.md
 docs/
   NVIDIA_AI_EVALUATION_ROADMAP.md            # 定案版長期 roadmap（Phase 1-10），最下方含 Claude review 補充
@@ -46,7 +46,8 @@ active/                                        # 工作中的暫存區，不進�
 - **每次開始工作前，先閱讀 `PROGRESS.md` 與 `TODO.md`**：`PROGRESS.md` 了解目前進度與上次停在哪裡，工作結束或有階段性產出時新增一筆紀錄（日期 + 做了什麼 + 下一步）；`TODO.md` 是跨對話留存的待辦清單（打勾框樣式），完成項目要打勾並保留刪除線，不要直接刪除整行，新的待辦事項也隨時加進對應區塊。
 - **`docs/00_phase1_2_learning_plan.md` 是「現在要做什麼」的最終依據**；`NVIDIA_AI_EVALUATION_ROADMAP.md` 則是長期地圖。若兩者看似衝突，近期工作以 phase learning plan 為準。
 - **`datasets/energyops_test_questions.json` 是 test oracle**（見其 `_meta.purpose`）：一旦 retrieval/citation 測試已經在使用它，就不要隨意修改題目或預期答案——修改它要當成變更 ground truth，而不是一般的資料修正。注意其 `verification_tiers` 欄位：只有 `verified` 的題目可以拿來算正式的 accuracy metric；`partially_verified` 僅能用於定性觀察；`unverified` 是行為面的判斷（系統是否恰當地拒答），不是事實比對。
-- 執行 Phase 2 的付費 API 比較（含 LLM-as-a-Judge 那一次呼叫）之前，計畫要求先用 MVP_V1 既有的 `embed-cost-estimate` skill 估算花費，不要盲跑。
+- 執行 Phase 2 的付費 API 比較（含 LLM-as-a-Judge 那一次呼叫）之前，先用本專案的 `api-cost-estimate` skill（`.claude/skills/api-cost-estimate/`）估算花費，不要盲跑。**注意**：舊版計畫文件（`docs/00_phase1_2_learning_plan.md`）可能還寫著 MVP_V1 的 `embed-cost-estimate`——那個算的是 embedding 成本，跟這裡要估的 chat completion／judge 呼叫成本是不同的東西，不要搞混，以 `api-cost-estimate` 為準。
 - Phase 2 預期產出為 `results/ai_model_scorecard_v1.md`（或 `.csv`），欄位為：Question ID、Model、Accuracy (人工)、Accuracy (Judge)、Latency、Tokens、Cost、Hallucination。
 - 依 roadmap 的 Phase 3，手動評測流程最終要變成 Python 的 `evaluation_runner.py`——但目前還不存在；不要假設它的介面長相，等真正進入該 Phase 時再重新設計。
 - 此 repo 的文件與 commit 風格說明主要語言為繁體中文（zh-TW）；編輯既有文件時請沿用中文，而非改用英文。
+- **「小插播」是優先回答信號**：使用者在任何進行中的任務期間，訊息開頭出現「小插播」三個字，代表這是一個要**優先回答**的問題，不用等手邊任務全部做完才處理。回答方式要**簡單、白話、簡短**，不要長篇大論，答完再視情況接續原本手邊在做的事。

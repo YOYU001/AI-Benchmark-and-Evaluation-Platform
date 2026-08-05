@@ -36,12 +36,12 @@
   - 確認以上防護不影響正常呼叫 API 的工作流程：程式（如未來的 `evaluation_runner.py`）自己用 `load_dotenv()` 讀取 `.env` 不會觸發任何一層防護，只有「Claude 自己想看到金鑰內容」這件事會被擋。
 - `CLAUDE.md` 補上 `active/` 資料夾結構說明（原本只記錄在 `.gitignore` 註解跟這份 PROGRESS.md 裡，未寫進主要架構文件）。
 - settings.json 補洞、AGENTS.md 資安限制記錄、CLAUDE.md active/ 說明已於 commit `2dd7945` 進版控。
-- 建立 `.claude/skills/periodic-housekeeping/`（`SKILL.md` + `scripts/check_line_counts.py` + `scripts/archive_progress.py`），用來定期檢查並整理 `CLAUDE.md`/`AGENTS.md`/`PROGRESS.md` 的行數（門檻 200 行；規則型文件用修剪、日誌型文件用歸檔）。兩支腳本都實際執行測試過（含中文輸出的 UTF-8 編碼修正）。
+- 建立 `.claude/skills/periodic-housekeeping/`（`SKILL.md` + `scripts/check_line_counts.py` + `scripts/archive_progress.py`），用來定期檢查並整理文件行數（規則型文件用修剪、日誌型文件用歸檔）。兩支腳本都實際執行測試過（含中文輸出的 UTF-8 編碼修正）。**門檻與範圍後續有更新，見下方 commit `991da5f` 那筆**：改成 150 行、檢查對象擴大到 5 份檔案（`CLAUDE.md`/`AGENTS.md`/`PROGRESS.md`/`README.md`/`TODO.md`），並新增「待辦清單型文件」第三種處理方式。
 - 建立三個自訂 subagent（`.claude/agents/`），格式統一為 frontmatter（name/description/tools/model）+ 獨立性原則 + 你會收到什麼 + 你要做什麼 + 回報格式：
   - `QA.md`（opus）：階段性成果的獨立審查驗證，只讀不改，且明確要求「沒問題就照實說沒問題，不用硬找瑕疵」。
   - `RESEARCH.md`（haiku）：大量平行資訊蒐集，定位為「保持母 agent context 乾淨」的手段，description 刻意不預設查詢範圍，交由母 agent 動態分配。
   - `CODE_REVIEW.md`（sonnet）：專注程式碼寫法品質（效率、簡潔、一致性），跟 `qa` 分工不重疊，不限語言。
-- 建立 `.claude/rules/`（`python.md`、`sql.md`），用 `paths` frontmatter 做路徑限定載入，內容聚焦效率與不易出錯的寫法。**尚未在此環境內實測驗證 `paths` 真的會被 Claude Code 依路徑條件載入**（2026-08-05 QA 審查提出質疑，指出 `paths`/`globs` 較常見於 Cursor 慣例）——待找機會實測。
+- 建立 `.claude/rules/`（`python.md`、`sql.md`），用 `paths` frontmatter 做路徑限定載入，內容聚焦效率與不易出錯的寫法。**已確認生效**：派完全沒看過本對話的全新 subagent，只在 prompt 裡提到一個 `.py`／`.sql` 路徑（檔案實際都不存在），兩次都回報收到對應的 `system-reminder` 區塊、附上規則檔逐字內容並正確標註來源路徑——連檔案都沒有真的被成功讀到，光是路徑文字出現就觸發了規則注入，證明 `paths` 機制是真的在運作。
 - 查證確認：`.claude/plugins/` 目前只裝了官方 `security-guidance@claude-plugins-official` 一個 plugin，三層防護（pattern 警告本機執行、Stop 時 LLM diff review 用 `claude-opus-4-7`、commit 時 agentic reviewer），且會把 diff/檔案內容送到模型端點（預設 `api.anthropic.com`）。
 - 用 `qa` agent 對整個環境配置做一次獨立審查，抓到 10 項文件與實際檔案不一致的落差，已修正：
   - `AGENTS.md` 的 `skill.md`→`SKILL.md`、補上 `scripts/` 子資料夾說明。
@@ -51,8 +51,11 @@
   - `AGENTS.md` 補上「搬去 WSL2 前必須先把 LLM provider 網域加進 `sandbox.network.allowedDomains`」的待辦提醒。
   - 本檔（`PROGRESS.md`）本身的落差（漏記工作、過時待辦、denyRead 範圍描述不精確）一併修正。
   - `results/` 補上 `.gitkeep`（原本是空資料夾、未被 git 追蹤，但多份文件已把它當既有結構在引用）。
-  - `archive_progress.py` 重複執行會累積重複提示行的小 bug，待修。
+  - `archive_progress.py` 重複執行會累積重複提示行的小 bug，**已修正並重新測試通過**（連續執行兩次不再重複）。
 - commit `d99cce6`：`.claude/agents/`、`.claude/rules/`、`.claude/skills/periodic-housekeeping/` 全數進版控，含 QA 審查後的 10 項修正。
 - 建立 `TODO.md`：跨對話留存的打勾框樣式待辦清單，跟 `PROGRESS.md`（歷史紀錄）分工——`PROGRESS.md` 記錄「做過什麼」，`TODO.md` 記錄「還沒做的事」。`CLAUDE.md` 已更新為每次開始工作前要同時讀 `PROGRESS.md` 與 `TODO.md`。之後新的待辦事項改記到 `TODO.md`，不再堆在這裡。
 - `agy` 加入 PATH：使用者重開機後確認生效（`agy --version` 可直接執行），`AGENTS.md` 呼叫方式已從完整路徑改回簡短的 `agy`，`TODO.md` 該項已打勾。
 - `.env` 內容使用者已自行填入，之後若需要除錯要用「是否存在／長度」的方式確認，不能直接讀取內容（持續性規則，不是待辦事項）。
+- 段落性里程碑檢查：問「環境建置好了、可以進 Phase 2 了嗎」，平行問了 `qa` agent + codex + copilot + agy 四方（呼應 `AGENTS.md` 的 Multi-LLM 討論流程，也是第一次實戰驗證這個流程）。過程中順手解決了 `agy` 非互動模式讀不到檔案的問題：它有自己獨立的 `C:\Users\User\.gemini\antigravity-cli\settings.json`，需要加 `permissions.allow: ["command(*)"]` 才能執行指令，且要用 `--add-dir <路徑>` 明確指定要讀的專案（它不會跟著 shell 的 `cd` 走，有自己獨立的「目前專案」概念）。四方一致結論：可以進 Phase 2。codex + agy 各自獨立提出「目前 tooling 相對於實際工作量偏重」的批評；copilot + agy 各自獨立發現 `embed-cost-estimate` skill 只存在於 MVP_V1、這個 repo 沒有；codex 額外抓到 `.gitignore` 允許 `.env.example` 但會被 `Read(.env.*)` 擋住的規則衝突（`.env.example` 目前還不存在，暫時無害）。
+- `AGENTS.md` 補上明確的階層宣告：Claude 是主要操作、思考、統整的領導者，codex/copilot/antigravity 是合作者、提供獨立意見，不是共同決策者，分歧時由 Claude 判斷取捨並對使用者負責。
+- 新增 `.claude/skills/api-cost-estimate/`（`SKILL.md` + `scripts/estimate_cost.py`），取代原本規劃借用的 MVP_V1 `embed-cost-estimate`。刻意設計成**不綁定任何特定專案或資料集**：題目來源可以是任意檔案（純文字一行一題，或 JSON 陣列／物件），也可以純手動指定數量與長度；同時考慮呼叫次數（`--reruns`）與 reasoning/thinking 深度（`--model`／`--judge` 可帶 `low`/`medium`/`high`/`xhigh` 效果等級，套用粗略的 output token 放大倍數）。用真實的 `energyops_test_questions.json` 題目文字實測過，也測過純手動輸入模式跟錯誤處理。`CLAUDE.md`／`docs/00_phase1_2_learning_plan.md` 裡舊的 `embed-cost-estimate` 引用已同步更正。

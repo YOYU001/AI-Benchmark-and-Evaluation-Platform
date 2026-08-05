@@ -38,7 +38,7 @@
 
 ### 執行前必做：成本估算
 
-Phase 2 會真的呼叫付費 API（含 LLM-as-a-Judge 那一次呼叫），跑之前先用 MVP_V1 專案既有的 `embed-cost-estimate` skill 估算花費，不要盲跑。
+Phase 2 會真的呼叫付費 API（含 LLM-as-a-Judge 那一次呼叫），跑之前先用本專案的 `api-cost-estimate` skill（`.claude/skills/api-cost-estimate/`）估算花費，不要盲跑。（原本規劃借用 MVP_V1 的 `embed-cost-estimate`，但那個算的是 embedding 成本，跟這裡要的 chat completion／judge 呼叫成本不是同一件事，2026-08-05 已改為本專案自己的 `api-cost-estimate`。）
 
 ### 產出
 
