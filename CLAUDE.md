@@ -27,7 +27,14 @@ datasets/
   energyops_retrieval_benchmark_baseline.json # MVP_V1 的 retrieval baseline 數字，作為 Baseline 參考
   energyops_chunking_comparison_baseline.json # Phase 5/6 之前用不到
 results/                                      # 每次評測跑出來的結果放這裡（目前是空的）
+active/                                        # 工作中的暫存區，不進版控（見下方說明）
+  research/                                    # 探索性研究、學習筆記草稿
+  execution/                                   # 執行中、尚未定案的評測中間產出
+  config/                                      # 實驗用的臨時設定草稿
+  temp/                                        # 純暫存，隨時可丟
 ```
+
+`active/` 底下四個子資料夾各自只保留一個 `.gitkeep` 佔位，實際內容透過 `.gitignore` 排除在版控之外，可以放心在裡面產生、堆放任何還沒定案的東西。**定案的東西要手動搬到 `results/`（評測結果）或 `docs/`（正式文件）**，`active/` 本身永遠不會出現在 commit 歷史裡。
 
 ## 這個 repo 的工作慣例
 

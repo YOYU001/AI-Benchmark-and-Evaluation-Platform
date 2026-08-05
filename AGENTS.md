@@ -90,3 +90,24 @@ skill 的檔案格式規定如下：
 - **之後若要 push 到 GitHub**：建議開啟 repository 的 secret scanning／push protection，作為 commit 前檢查之外的最後一道防護網。
 
 以上是我先想到、你原本兩點之外可能有漏的地方，如果有不適用這個專案現況的可以再跟我說要不要拿掉。
+
+### `.claude/settings.json` 已知限制（2026-08-05 資安審查發現）
+
+以下兩點是設定上**沒辦法單純靠改設定值就完全解決**的真實限制，記錄下來避免以後誤以為現有防護是滴水不漏的：
+
+- **`permissions.ask` 只是文字前綴比對，不是真的懂 shell 語法**：例如 `Bash(npm install*)` 只會擋住「指令開頭就是 `npm install`」的情況，像 `cd tmp && npm install x`、`true; npm install x` 這種複合指令因為開頭文字不符，會直接繞過確認、被當成允許執行。這代表 `ask` 清單只能防「不小心／照著建議直接下指令」的情境，防不了刻意規避。真正扛住「就算裝到惡意套件也不能外流資料」這件事的是 `sandbox.credentials.files`（讓資料在系統層級被遮蔽），不是 `ask` 清單本身，兩者要分清楚各自的防護邊界。
+- **`sandbox.failIfUnavailable: false` 是刻意的 fail-open 選擇，不是疏漏**：目的是避免這台機器如果不支援 sandbox，導致所有 Bash 指令直接壞掉、整個工作環境用不了。代價是：如果 sandbox 真的無法啟動，防護會**悄悄失效**、只留一個容易被忽略的警告，實際保護程度會回到只剩 `permissions.deny`／`ask` 這一層。
+
+### 已確認：`sandbox` 在這台機器（原生 Windows 11）上完全不生效
+
+2026-08-05 用乾淨的測試方式驗證過（另找一個不會觸發 Claude Code 內建防護的檔名，臨時加進 `sandbox.credentials.files`，測完立刻清掉）：**sandbox 的憑證保護沒有擋住任何東西，讀取成功**。
+
+查證後確認原因：**Claude Code 的 sandbox 功能官方明確不支援原生 Windows**，只支援 macOS、Linux、WSL2（原生 Windows 沒有對應的底層隔離機制，如 macOS 的 Seatbelt 或 Linux 的 `bubblewrap`）。這**不是設定沒套用或需要重啟的問題，是平台本身的硬性限制**——這台機器（LG gram Pro 16", Windows 11 Home, 原生環境非 WSL2）不管重開機幾次，`sandbox.enabled: true` 都不會真的生效，`failIfUnavailable: false` 會讓它安靜地 fallback 成不啟動。
+
+**目前 `.env` 系列敏感檔案的實際防護，只剩這幾層**（sandbox 不算在內）：
+1. Claude Code 內建的硬性防護——連 Bash 指令的文字內容提到 `.env`／`.ssh`／`secrets.json` 這類憑證檔名，都會被直接擋下來，使用者的確認也無法解除（已驗證有效）。
+2. `permissions.deny`——Read 工具讀不到這些檔案（已驗證有效）。
+3. `permissions.ask`——安裝套件需要人工確認，但可被複合指令繞過（見上方已知限制）。
+4. 使用者自行核對套件名稱（人工防線）。
+
+若之後真的需要 sandbox 那層完整保護，唯一路徑是在 **WSL2** 裡跑 Claude Code，這是遠比重開機更大的環境改動，目前沒有急迫性，先不處理。`sandbox.*` 設定保留在 `.claude/settings.json` 裡不刪除（沒有壞處，也是為將來搬到 WSL2 先鋪路），但不要誤以為它現在有在保護東西。

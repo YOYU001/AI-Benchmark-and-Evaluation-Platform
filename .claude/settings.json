@@ -23,7 +23,15 @@
     "credentials": {
       "files": [
         { "path": ".env", "mode": "deny" },
-        { "path": ".env.local", "mode": "deny" }
+        { "path": ".env.local", "mode": "deny" },
+        { "path": "secrets.json", "mode": "deny" },
+        { "path": ".ssh", "mode": "deny" }
+      ]
+    },
+    "filesystem": {
+      "denyRead": [
+        "**/secrets.json",
+        "**/.ssh/**"
       ]
     },
     "network": {
