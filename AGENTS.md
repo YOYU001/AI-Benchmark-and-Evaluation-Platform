@@ -17,6 +17,8 @@
 
 思考原則：預設以「省 token、速度快、但正確率高」為優先；但遇到真的需要深度推理、多步驟判斷的情境時，仍要切換成足夠的思考深度，不因為省 token 而犧牲正確性。
 
+**派出幾個子代理的判斷原則**：遇到可以拆成多角度的研究型任務時，預設傾向多派幾個角度平行蒐集，不要只派一個就直接下結論；數量依題目實際能拆出多少個有意義的角度彈性調整，大約落在 **2～10 個**之間。這是彈性參考範圍，不是固定下限——角度不夠多的題目不用硬湊數量，導致子代理找到重複或稀薄的內容。
+
 ### 協作流程：Find out / Find in
 
 多個子代理之間的協作，走「Find out / Find in」流程：先讓多個子代理**同步、平行地各自去查找資料**（Find out），彼此獨立作業；查找完成後，再把每個子代理各自查到的內容**整合、彙總在一起**（Find in），統一交給負責整合判斷的 agent（通常是 Leader）做後續分析與決策。
@@ -29,9 +31,11 @@
 
 不同職責的 agent 要各自獨立運作、context 互不汙染，工作內容透過「傳遞」而非「共用同一個 context」的方式交接。基本分工範例：
 
-- **Developer**：負責主要開發工作的主 agent。
-- **QA**：負責審查、驗證正確性的 agent。
-- **Test**：負責測試的 agent。
+實際在這個專案裡建立的自訂 subagent（`.claude/agents/`）：
+
+- **`qa`**（model: opus）：階段性成果完成後，不受先前討論脈絡影響的獨立審查與驗證，只讀不改。
+- **`research`**（model: haiku）：大量平行蒐集與整理資訊，讓母 agent 的 context 不被搜尋過程的雜訊汙染，只讀不改。
+- **`code-review`**（model: sonnet）：專注在程式碼本身的乾淨度、簡潔度、效率，跟 `qa` 分工不重疊（`qa` 管測試驗證，這個管程式碼寫法品質），只讀不改。
 
 也就是把不同階段的結果分派給不同的 agent 各自處理，處理完再把結果傳遞給下一個 agent，避免所有工作都塞在同一個 agent 的 context 裡，導致資訊互相干擾或 context 過長而失焦。
 
@@ -39,11 +43,12 @@
 
 當發現某個動作是**重複執行**、或**日後很可能還要再做一次**的工作時，不要每次都臨時現做，而是把它封裝成一個 skill，方便之後直接呼叫、重複沿用。
 
-skill 的檔案格式規定如下：
+skill 的檔案格式規定如下（放在 `.claude/skills/<skill-name>/`）：
 
-- 每個 skill 都要**先有一個 `skill.md`**，說明這個 skill 的用途、何時該觸發使用、輸入輸出、使用方式。
-- 若這個 skill 實際需要執行程式邏輯（例如需要一支 `.py` 檔案來做實際運算、呼叫 API 等），才在 `skill.md` 之外另外加上對應的程式檔案（例如 `.py`），由 `skill.md` 說明如何呼叫它。
-- 也就是 `skill.md` 是每個 skill 的**必要說明入口**，程式檔案是視需要才加上的**實作細節**，不能只有程式檔案而沒有 `skill.md`。
+- 每個 skill 都要**先有一個 `SKILL.md`**（大寫，Claude Code 認的就是這個檔名，小寫不會被載入），說明這個 skill 的用途、何時該觸發使用、輸入輸出、使用方式。
+- 若這個 skill 實際需要執行程式邏輯（例如需要一支 `.py` 檔案來做實際運算、呼叫 API 等），才在 `SKILL.md` 之外另外建立 `scripts/` 子資料夾放對應的程式檔案，由 `SKILL.md` 說明如何呼叫它。
+- 也就是 `SKILL.md` 是每個 skill 的**必要說明入口**，`scripts/` 底下的程式檔案是視需要才加上的**實作細節**，不能只有程式檔案而沒有 `SKILL.md`。
+- 範例：`.claude/skills/periodic-housekeeping/SKILL.md` + `.claude/skills/periodic-housekeeping/scripts/*.py`。
 
 ## Multi-LLM 討論流程（diversification）
 
@@ -78,7 +83,7 @@ skill 的檔案格式規定如下：
 - 安裝任何新套件（`npm install`、`pip install` 等）之前，**先核對套件名稱是否與官方文件／官方 registry（npmjs.com、PyPI）上的名稱完全一致**，不要單憑記憶或聯想直接下指令。
 - 安裝前檢查該套件的可信度：maintainer 是否合理、下載量／使用量是否符合預期、發布時間、是否有對應的官方 GitHub repo 連結。有任何疑慮，先跟使用者確認再安裝，不要自行判斷後直接裝。
 - 安裝新依賴前，先明確列出「要安裝的套件名稱＋版本」讓使用者能一眼檢查是否有異常拼字或不熟悉的套件，不要讓安裝動作悄悄發生。
-- **啟用 Claude Code 的權限機制（permission settings）**，讓 `npm install`／`pip install` 這類會拉入外部程式碼執行的指令，預設都要經過人工確認才能執行，不要設成自動允許（auto-approve）；如果不確定目前的權限設定是否足夠，用 `update-config` skill 檢查並調整 `settings.json`。
+- **啟用 Claude Code 的權限機制（permission settings）**，讓 `npm install`／`pip install` 這類會拉入外部程式碼執行的指令，預設都要經過人工確認才能執行，不要設成自動允許（auto-approve）；如果不確定目前的權限設定是否足夠，用 Claude Code **內建**的 `update-config` skill 檢查並調整 `settings.json`（這是 Claude Code 本身內建的 skill，不在這個專案的 `.claude/skills/` 底下，不要跟專案自訂的 skill 搞混）。
 - 有能力區分的情況下，優先以 `--ignore-scripts` 之類的方式安裝（避免安裝當下就自動執行 postinstall script），除非明確知道該套件需要安裝腳本才能正常運作。
 
 ### 目前規則之外，建議一併留意的資安缺口
@@ -111,3 +116,5 @@ skill 的檔案格式規定如下：
 4. 使用者自行核對套件名稱（人工防線）。
 
 若之後真的需要 sandbox 那層完整保護，唯一路徑是在 **WSL2** 裡跑 Claude Code，這是遠比重開機更大的環境改動，目前沒有急迫性，先不處理。`sandbox.*` 設定保留在 `.claude/settings.json` 裡不刪除（沒有壞處，也是為將來搬到 WSL2 先鋪路），但不要誤以為它現在有在保護東西。
+
+**搬去 WSL2 之前必須先處理的事**（2026-08-05 QA 審查發現）：`sandbox.network.allowedDomains` 目前只放了 `registry.npmjs.org`／`pypi.org`／`files.pythonhosted.org`，完全沒有放任何 LLM provider 的網域。這在 sandbox 沒作用的現在沒有影響，但這個專案的核心工作（Phase 2 AI Battle、Phase 3 `evaluation_runner.py`）就是要呼叫付費 LLM API——**一旦真的搬到 WSL2 讓 sandbox 生效，這份白名單會直接擋掉評測腳本對外呼叫 API**，必須先把要用到的 LLM provider 網域加進 `allowedDomains` 才能搬。
