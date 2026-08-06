@@ -22,3 +22,7 @@ Thumbs.db
 active/**
 !active/**/
 !active/**/.gitkeep
+
+# chunking-autoresearch 實驗紀錄，跟 autoresearch 原版一樣不進版控
+tools/chunking_autoresearch/results.tsv
+tools/chunking_autoresearch/run.log

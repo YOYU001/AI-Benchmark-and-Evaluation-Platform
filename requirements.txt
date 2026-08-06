@@ -1,0 +1,6 @@
+# tools/chunking_autoresearch/ 依賴套件
+# 這是本專案第一次出現真正的 Python 程式碼，requirements.txt 因此建立
+# （見 memory: project_requirements_txt_trigger）
+
+pymupdf==1.28.0
+mcp==1.28.1
