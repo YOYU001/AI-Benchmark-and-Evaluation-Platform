@@ -11,8 +11,11 @@
 
 ## Setup（第一次開始前，先跟人類一起確認）
 
-1. **談好一個 run tag**：根據今天的日期提議一個 tag（例如 `aug7`）。分支
-   `chunking-autoresearch/<tag>` 不能已經存在——這一定是全新的一輪。
+1. **談好一個 run tag**：用今天的完整日期，格式固定是 `YYYY-MM-DD`（例如
+   `2026-08-07`，用連字號分隔，不要用英文月份縮寫、也不要用斜線——斜線在
+   git 分支名稱裡代表階層，日後不同輪次的路徑深度一旦對不齊會直接衝突報錯）。
+   分支 `chunking-autoresearch/<tag>` 不能已經存在——這一定是全新的一輪。
+   如果同一天要跑第二輪，在後面加 `-2`、`-3` 這樣遞增（例如 `2026-08-07-2`）。
 2. **建立分支**：從目前的 `master` 開 `git checkout -b chunking-autoresearch/<tag>`。
 3. **讀懂範圍內的檔案**：
    - `README.md` — 這個資料夾的背景說明。
@@ -168,7 +171,7 @@ d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數
 
 ## 實驗迴圈
 
-實驗跑在專屬分支上（例如 `chunking-autoresearch/aug7`）。這個 repo 在你
+實驗跑在專屬分支上（例如 `chunking-autoresearch/2026-08-07`）。這個 repo 在你
 開始之前，`tools/chunking_autoresearch/` 整個資料夾應該已經是 **tracked**
 狀態（人類已經先建好一個乾淨的 baseline commit）——如果你發現 `git status`
 顯示這個資料夾是 untracked，先停下來告訴人類，不要自己 `git add` 整個
