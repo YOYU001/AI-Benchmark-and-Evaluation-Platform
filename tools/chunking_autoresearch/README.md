@@ -26,6 +26,8 @@ custom subagent 加上 `codex` 一起做了一次獨立審查，抓到「品質�
 - **`program.md`** — 餵給 Hermes 的操作說明／agent skill，包含完整的
   setup 步驟、能改不能改的規則、記分方式、以及「有明確停止條件」的實驗
   迴圈演算法。
+- **`dashboard.py`** — 本機即時儀表板，讀 `results.tsv` 畫出每項指標的
+  趨勢圖跟成長百分比，瀏覽器打開會自動重新整理。
 
 ## 記分方式（第二版修正過的部分）
 
@@ -80,6 +82,25 @@ strategy_name:     baseline_structured_600_100
 一個乾淨的起點才會正確運作。如果不確定，先跑 `git status` 確認
 `tools/chunking_autoresearch/` 不在 untracked 清單裡。
 
+## 即時儀表板
+
+```bash
+python dashboard.py
+```
+
+瀏覽器打開 `http://127.0.0.1:8765/`，每 5 秒自動重新整理一次。畫面內容：
+
+- 每項指標（`cost`／`quality_pass_rate`／`content_coverage`／`seconds`）
+  的趨勢折線圖，跟相對第一筆 `keep` 紀錄的成長百分比
+- 總實驗數／keep／discard／crash 的統計
+- 最近 30 筆實驗紀錄的表格
+
+`results.tsv` 裡**每一筆紀錄都會保留**（包含失敗的 discard／crash），只有
+失敗嘗試的 `strategy.py` 程式碼本身會被 `program.md` 流程裡的 `git reset`
+丟掉——log 保留完整歷史，儀表板才能看到「失敗過幾次、後來怎麼找到對的
+方向」的真實趨勢，不是只看到一路向上的曲線。Hermes 在背景持續寫新的實驗
+結果時，這個頁面留著開就會一直更新，不用手動重新整理或重啟。
+
 ## MCP 橋接（讓 Claude Code 查詢實驗結果）
 
 ```bash
@@ -107,3 +128,6 @@ claude mcp add chunking-research -- python "<repo 絕對路徑>/tools/chunking_a
   跑，這塊值得加強。
 - **Hermes 部署到 NAS**：這裡只負責準備好 Hermes（不管跑在本機還是 NAS）
   需要的實驗環境跟指令。
+- **直接連上 MVP_V1 正式資料庫、持續觀察資料型態／大小變化、回饋優化建議**：
+  這是更後期、真的接上正式環境的階段，跟這裡「第一階段零成本本機模擬」不
+  是同一件事，先記在專案根目錄的 `TODO.md`，真的要做時再細談設計。

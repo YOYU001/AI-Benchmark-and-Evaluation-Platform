@@ -82,3 +82,9 @@
   - 全部修正都重新跑過驗證：baseline 正常、退化策略被正確擋下、timeout 正確觸發、mcp_server 三個工具都正常、`.gitignore` 排除產物正確、從 repo 根目錄跟 `tools/chunking_autoresearch/` 兩種工作目錄執行都正常（codex 原本擔心的「可能從錯誤目錄執行」問題，實測證實現有設計已經用 `Path(__file__)` 處理掉了，不是真的問題）。
   - commit 把 `tools/chunking_autoresearch/`、`docs/spike_documents/`（4 份 PDF）、`requirements.txt` 一起進版控，讓 `program.md` 裡 Hermes 要用的 git commit/reset 流程有一個乾淨、tracked 的起點可以運作。
 - 下一步：讓 Hermes 實際照這一版修正過的 `program.md` 走一次完整的 setup + 實驗迴圈（仍然還沒讓 Hermes 自己跑過，這次多了硬性品質門檻，理論上不會再重演「丟資料換分數」的問題，但要實際跑過才能確認）。
+- **加入即時儀表板 `dashboard.py`**：在正式讓 Hermes 開始跑之前，使用者提出想先確認「結果能不能做成儀表板、記錄每項指標的成長趨勢與成長%、失敗的資料與方式會不會被丟棄、24 小時不間斷跑」這幾件事。釐清後的結論：
+  - `results.tsv` 的紀錄本來就是全部保留（含 discard／crash），只有失敗嘗試的 `strategy.py` 程式碼本身會被 `git reset` 丟掉——確認現有機制已經符合「留下完整趨勢、只丟棄失敗的程式碼」的需求，不用改。
+  - 不需要固定「每次測試 5 分鐘」（那是誤會，我們的 chunking 測試本身很快，不像 Karpathy 原版的 GPU 訓練需要真的跑滿時間才有意義）。
+  - `program.md` 的硬性停止條件（避免 Hermes 真的失控無限跑）從「跑滿 500 次／4 小時」拉高到「跑滿 5000 次／24 小時」，符合「本機 24 小時不間斷」的使用情境；但「連續 10 次 crash」「連續 30 次沒有任何進步」這兩條防系統性問題失控的煞車、以及「進步超過 20% 就停下回報人類」都維持不變，不因為想跑得久就放寬。
+  - 新增 `dashboard.py`：純標準函式庫（不加新套件）寫的本機 HTTP server，讀 `results.tsv` 用 inline SVG 畫出 `cost`／`quality_pass_rate`／`content_coverage`／`seconds` 四項指標的趨勢折線圖，跟相對第一筆 keep 紀錄的成長百分比，瀏覽器打開 `http://127.0.0.1:8765/` 每 5 秒自動重新整理。用假資料（含 keep/discard/crash 混合）實測過：成長百分比計算正確（cost 下降顯示為正成長、quality/coverage 用直接差值），總數統計含 discard/crash 在內都正確。
+  - 「之後接上 MVP_V1 正式資料庫、持續觀察資料型態/大小、回饋優化建議」使用者確認是更後期的階段，跟現在的「第一階段零成本本機模擬」不是同一件事，先記進 `TODO.md`，之後真的要做時再細談設計（權限範圍、唯讀與否、怎麼避免影響正式環境效能都還沒討論）。
