@@ -31,7 +31,7 @@ REFRESH_SECONDS = 5
 
 # (欄位名稱, 顯示標籤, 數字越大是不是越好)
 METRICS = [
-    ("cost", "Cost（越低越好）", False),
+    ("cost", "Cost（效能分數，數字越低越好——不是金錢單位，這階段完全零成本）", False),
     ("quality_pass_rate", "Quality Pass Rate（越高越好）", True),
     ("content_coverage", "Content Coverage（越高越好）", True),
     ("seconds", "Seconds（越低越好）", False),
@@ -52,23 +52,54 @@ def _safe_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def _sparkline_svg(values: list[float], higher_is_better: bool, width: int = 560, height: int = 120) -> str:
+def _step_change_pct(prev: float, cur: float, higher_is_better: bool) -> float:
+    """相對「上一個 keep 點」的變化百分比，不是相對第一筆——每個點標的是
+    這一步本身有沒有進步，才回答得出「哪一輪貢獻了多少」。"""
+    if prev == 0:
+        return 0.0
+    raw = (cur - prev) / abs(prev) * 100
+    return raw if higher_is_better else -raw
+
+
+def _sparkline_svg(
+    values: list[float], higher_is_better: bool, width: int = 560, height: int = 150
+) -> str:
     if not values:
         return "<p>（還沒有資料）</p>"
-    if len(values) == 1:
-        values = values * 2  # 只有一筆資料時畫一條水平線，避免除以零
-    lo, hi = min(values), max(values)
+    padded_top = 28  # 給點上方的百分比標籤留空間
+    plot_height = height - padded_top
+    display_values = values * 2 if len(values) == 1 else values  # 只有一筆資料畫水平線，避免除以零
+    lo, hi = min(display_values), max(display_values)
     span = hi - lo or 1.0
-    n = len(values)
+    n = len(display_values)
     step = width / max(n - 1, 1)
-    coords = [(i * step, height - ((v - lo) / span) * height) for i, v in enumerate(values)]
+    coords = [
+        (i * step, padded_top + plot_height - ((v - lo) / span) * plot_height)
+        for i, v in enumerate(display_values)
+    ]
     color = "#4caf50" if higher_is_better else "#42a5f5"
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
-    circles = "".join(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}" />' for x, y in coords)
+
+    points_svg = []
+    for i, ((x, y), v) in enumerate(zip(coords, display_values)):
+        if i == 0:
+            label = "baseline"
+        else:
+            pct = _step_change_pct(display_values[i - 1], v, higher_is_better)
+            label = f"{pct:+.1f}%"
+        # <title> 是瀏覽器原生 hover tooltip，不需要額外的 JS 套件
+        points_svg.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}">'
+            f"<title>第 {i + 1} 筆：{v:.6f}（{label}）</title>"
+            f"</circle>"
+            f'<text x="{x:.1f}" y="{max(y - 10, 10):.1f}" font-size="11" fill="{color}" '
+            f'text-anchor="middle">{html.escape(label)}</text>'
+        )
+
     return (
         f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" role="img">'
         f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{polyline}" />'
-        f"{circles}"
+        f"{''.join(points_svg)}"
         f"</svg>"
     )
 
