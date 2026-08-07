@@ -47,9 +47,9 @@ def list_chunking_experiments(limit: int = 20) -> list[dict]:
 
 @mcp.tool()
 def get_best_chunking_strategy() -> Optional[dict]:
-    """回傳目前 status 為 keep、cost 最低的那筆實驗紀錄。"""
-    scored = [(r, _safe_float(r.get("cost"))) for r in _read_rows() if r.get("status") == "keep"]
-    scored = [(r, cost) for r, cost in scored if cost is not None]
+    """回傳目前 status 為 keep、cost_time 最低的那筆實驗紀錄。"""
+    scored = [(r, _safe_float(r.get("cost_time"))) for r in _read_rows() if r.get("status") == "keep"]
+    scored = [(r, cost_time) for r, cost_time in scored if cost_time is not None]
     if not scored:
         return None
     return min(scored, key=lambda pair: pair[1])[0]
@@ -57,18 +57,18 @@ def get_best_chunking_strategy() -> Optional[dict]:
 
 @mcp.tool()
 def get_chunking_experiment_summary() -> dict:
-    """回傳實驗統計：keep/discard/crash 各幾筆、目前最好的 cost、最後一筆的說明。"""
+    """回傳實驗統計：keep/discard/crash 各幾筆、目前最好的 cost_time、最後一筆的說明。"""
     rows = _read_rows()
     kept = [r for r in rows if r.get("status") == "keep"]
     discarded = [r for r in rows if r.get("status") == "discard"]
     crashed = [r for r in rows if r.get("status") == "crash"]
-    kept_costs = [c for c in (_safe_float(r.get("cost")) for r in kept) if c is not None]
+    kept_cost_times = [c for c in (_safe_float(r.get("cost_time")) for r in kept) if c is not None]
     return {
         "total_experiments": len(rows),
         "kept": len(kept),
         "discarded": len(discarded),
         "crashed": len(crashed),
-        "best_cost": min(kept_costs) if kept_costs else None,
+        "best_cost_time": min(kept_cost_times) if kept_cost_times else None,
         "latest_description": rows[-1]["description"] if rows else None,
     }
 

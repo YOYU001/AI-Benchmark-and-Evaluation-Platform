@@ -7,8 +7,8 @@ agent（Hermes）絕對不能編輯這個檔案。
 修掉的核心問題：
   1. 品質檢查原本只驗證欄位格式，完全沒檢查「內容有沒有被保留下來」——
      QA 實測證明：一個把資料整個丟光的策略反而能拿到比 baseline 更低的
-     cost。現在加了 content coverage 的硬性門檻（見 MIN_CONTENT_COVERAGE），
-     沒過門檻直接给一個遠高於任何正常結果的 cost，不再能用「少做事」取巧。
+     cost_time。現在加了 content coverage 的硬性門檻（見 MIN_CONTENT_COVERAGE），
+     沒過門檻直接给一個遠高於任何正常結果的 cost_time，不再能用「少做事」取巧。
   2. strategy.chunk() 現在透過 `_worker.py` 在獨立 subprocess 裡執行，
      父行程自己的計時器／常數碰不到，也真的有 timeout 強制中止。
   3. 計時範圍排除 PDF 解析（固定成本、策略改不動），並且跑三次取中位數，
@@ -56,7 +56,7 @@ DOCUMENTS = [
 MIN_CONTENT_COVERAGE = 0.90
 SHINGLE_SIZE = 30
 
-# 硬性失敗（quality 或 coverage 沒過門檻）的 cost 基準值，遠高於任何正常
+# 硬性失敗（quality 或 coverage 沒過門檻）的 cost_time 基準值，遠高於任何正常
 # 執行結果，讓「投機取巧」永遠競爭不過「認真切但慢一點」。
 HARD_FAILURE_BASE = 1000.0
 
@@ -225,16 +225,16 @@ def run() -> None:
 
     hard_gate_passed = quality_pass_rate >= 1.0 and avg_content_coverage >= MIN_CONTENT_COVERAGE
     if hard_gate_passed:
-        cost = normalized_seconds
+        cost_time = normalized_seconds
     else:
-        cost = (
+        cost_time = (
             HARD_FAILURE_BASE
             + (1 - avg_content_coverage) * 100
             + (1 - quality_pass_rate) * 100
         )
 
     print("---")
-    print(f"cost:              {cost:.6f}")
+    print(f"cost_time:         {cost_time:.6f}")
     print(f"quality_pass_rate: {quality_pass_rate:.6f}")
     print(f"content_coverage:  {avg_content_coverage:.6f}")
     print(f"hard_gate_passed:  {hard_gate_passed}")

@@ -1,6 +1,6 @@
 """tools/chunking_autoresearch/dashboard.py
 
-本機即時儀表板：讀 `results.tsv`，畫出每個指標（cost／quality_pass_rate／
+本機即時儀表板：讀 `results.tsv`，畫出每個指標（cost_time／quality_pass_rate／
 content_coverage／seconds）隨時間變化的趨勢圖，以及相對第一筆 keep 紀錄的
 成長百分比。純標準函式庫實作，不加新的相依套件——圖表用 inline SVG 手動畫，
 不需要 matplotlib。
@@ -31,7 +31,7 @@ REFRESH_SECONDS = 5
 
 # (欄位名稱, 顯示標籤, 數字越大是不是越好)
 METRICS = [
-    ("cost", "Cost（效能分數，數字越低越好——不是金錢單位，這階段完全零成本）", False),
+    ("cost_time", "Cost Time（效能分數，數字越低越好——不是金錢單位，這階段完全零成本）", False),
     ("quality_pass_rate", "Quality Pass Rate（越高越好）", True),
     ("content_coverage", "Content Coverage（越高越好）", True),
     ("seconds", "Seconds（越低越好）", False),
@@ -138,7 +138,7 @@ def render_page() -> str:
     history_rows = "".join(
         f"<tr><td>{html.escape(r.get('commit', ''))}</td>"
         f"<td>{html.escape(r.get('status', ''))}</td>"
-        f"<td>{html.escape(r.get('cost', ''))}</td>"
+        f"<td>{html.escape(r.get('cost_time', ''))}</td>"
         f"<td>{html.escape(r.get('description', ''))}</td></tr>"
         for r in reversed(rows[-30:])
     )
@@ -166,7 +166,7 @@ td, th {{ border-bottom: 1px solid #263140; padding: 4px 8px; text-align: left; 
 </div>
 {"".join(sections)}
 <section><h2>最近 30 筆紀錄</h2>
-<table><tr><th>commit</th><th>status</th><th>cost</th><th>description</th></tr>
+<table><tr><th>commit</th><th>status</th><th>cost_time</th><th>description</th></tr>
 {history_rows}
 </table></section>
 <p style="opacity:.5">每 {REFRESH_SECONDS} 秒自動重新整理。資料來源：results.tsv</p>

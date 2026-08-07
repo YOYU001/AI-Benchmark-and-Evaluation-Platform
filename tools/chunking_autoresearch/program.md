@@ -65,20 +65,22 @@ uv run harness.py
   改了函式名稱或參數，每次實驗都會直接 crash。函式內部（演算法本身）完全
   自由，只有這個對外接口不能動。
 
-**目標很簡單：讓 `cost` 越低越好。** `cost` 的計算方式：
+**目標很簡單：讓 `cost_time` 越低越好。**（這個名字是特意取的：純粹是
+「執行時間」換算出來的分數，不是金錢單位，這階段完全零成本、不呼叫任何
+付費 API。）`cost_time` 的計算方式：
 
 1. **先看硬性門檻（hard gate）**：`quality_pass_rate` 必須等於 1.0（所有
    chunk 的欄位格式都合法），而且 `content_coverage` 必須 ≥ 0.90（原始文件
    的內容至少有 90% 真的出現在你切出來的 chunk 裡）。
-2. **兩個門檻都過了**，`cost` 就是這次執行時間相對於 baseline 的倍數
+2. **兩個門檻都過了**，`cost_time` 就是這次執行時間相對於 baseline 的倍數
    （`normalized_seconds`）——這時候才是真正在比「誰切得快」。
-3. **只要有一個門檻沒過**，`cost` 會被設成一個遠高於任何正常結果的數字
+3. **只要有一個門檻沒過**，`cost_time` 會被設成一個遠高於任何正常結果的數字
    （1000 起跳，看沒過門檻的程度往上加），保證輸給任何有認真切的策略。
 
 **這代表什麼**：不要想著「切少一點、切快一點」來取巧。`harness.py` 會
 用內容比對（比較切出來的 chunk 有沒有涵蓋到原始文件的內容）抓出「丟資料
-換取速度」這種投機做法，一旦被抓到，`cost` 會爆表，肯定比 baseline 差。
-真正能讓 `cost` 進步的路只有一條：**在保留完整內容的前提下，讓 chunking
+換取速度」這種投機做法，一旦被抓到，`cost_time` 會爆表，肯定比 baseline 差。
+真正能讓 `cost_time` 進步的路只有一條：**在保留完整內容的前提下，讓 chunking
 本身跑得更快，或是讓格式檢查更穩定地全數通過**。
 
 **簡潔原則**：條件都一樣的話，簡單的寫法比較好。一個很小的進步卻讓程式碼變
@@ -115,11 +117,11 @@ uv run harness.py
 
 ```
 ---
-cost:              1.012085
+cost_time:         0.988424
 quality_pass_rate: 1.000000
 content_coverage:  0.999582
 hard_gate_passed:  True
-seconds:           0.111329
+seconds:           0.108727
 baseline_seconds:  0.110000
 num_chunks:        257
 strategy_name:     baseline_structured_600_100
@@ -130,7 +132,7 @@ strategy_name:     baseline_structured_600_100
 用這個抓出關鍵指標：
 
 ```
-grep "^cost:" run.log
+grep "^cost_time:" run.log
 ```
 
 如果 `grep` 抓不到任何東西，代表這次執行失敗或逾時了（沒有印出摘要），
@@ -144,12 +146,12 @@ grep "^cost:" run.log
 表頭跟 7 個欄位：
 
 ```
-commit	cost	quality_pass_rate	content_coverage	seconds	status	description
+commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description
 ```
 
 1. git commit hash（短版，7 碼）
-2. 這次跑出來的 cost——crash 或逾時的話填 `999999.000000`（代表「無限差」，
-   不要填 0——`cost` 是越低越好，0 會被誤判成「最好的結果」）
+2. 這次跑出來的 cost_time——crash 或逾時的話填 `999999.000000`（代表「無限差」，
+   不要填 0——`cost_time` 是越低越好，0 會被誤判成「最好的結果」）
 3. quality_pass_rate——crash 的話填 `0.000000`
 4. content_coverage——crash 的話填 `0.000000`
 5. seconds——crash 的話填 `0.000000`
@@ -159,7 +161,7 @@ commit	cost	quality_pass_rate	content_coverage	seconds	status	description
 範例：
 
 ```
-commit	cost	quality_pass_rate	content_coverage	seconds	status	description
+commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description
 a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	baseline
 b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	改用更嚴格的表格偵測
 c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	改成過度激進的過濾，內容覆蓋率沒過門檻
@@ -187,15 +189,15 @@ d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數
 3. `git add strategy.py && git commit -m "描述這次嘗試"`
 4. 跑實驗：`python harness.py > run.log 2>&1`（全部導向檔案，不要用 tee，
    也不要讓輸出灌爆你自己的 context）。
-5. 讀結果：`grep "^cost:\|^quality_pass_rate:\|^content_coverage:" run.log`
+5. 讀結果：`grep "^cost_time:\|^quality_pass_rate:\|^content_coverage:" run.log`
 6. grep 沒東西代表 crash 了。跑 `tail -n 50 run.log` 看 Python 錯誤訊息，
    試著修。修了幾次還是不行，就放棄這個想法，跳到步驟 7 用 crash 記錄，
    然後執行步驟 9 的丟棄動作。
 7. 把結果記進 tsv（提醒：不要把 `results.tsv` 加進 git）。
-8. 如果 `cost` 進步了（變低）**而且 `hard_gate_passed` 是 `True`**，保留
+8. 如果 `cost_time` 進步了（變低）**而且 `hard_gate_passed` 是 `True`**，保留
    這個 commit（status 記 `keep`），繼續往前推進分支——不需要做任何 git
    操作，這個 commit 已經是目前分支的 HEAD，直接進入下一輪。
-9. 如果 `cost` 一樣或變差，或是 `hard_gate_passed` 是 `False`（status 記
+9. 如果 `cost_time` 一樣或變差，或是 `hard_gate_passed` 是 `False`（status 記
    `discard`），或是 crash 了（status 記 `crash`），執行：
    `git reset --hard <attempt_base>`（用步驟 1 記下的那個雜湊值，不是
    `HEAD^`）——精確回到這一輪開始之前的狀態。
@@ -235,12 +237,12 @@ GPU 訓練場景。這裡改成**有明確的硬性停止條件**（達到任何
   這條「系統性問題」的煞車不因為想跑滿 24 小時而放寬），或
 - **連續 30 次都是 discard、沒有任何一次 keep**（代表已經找不到新方向了，
   同樣不因為想跑滿 24 小時而放寬），或
-- **`cost` 比一開始的 baseline 進步超過 20%**——這代表已經有夠好的候選了，
+- **`cost_time` 比一開始的 baseline 進步超過 20%**——這代表已經有夠好的候選了，
   接下來要不要花錢接上真的 embedding API 做搜尋準確度驗證，是人類要自己
   決定、自己用 `.claude/skills/api-cost-estimate/` 估算成本的事，不是你
   可以自己決定去做的。
 
 在跑到以上任何一個條件之前，不要主動停下來問人類「要繼續嗎」——正常情況
 下就是照這個迴圈一直跑。觸發任何一個停止條件後，整理一段摘要（最好的
-幾個 commit、對應的 cost、簡短說明改了什麼），回報給人類，然後停下來
+幾個 commit、對應的 cost_time、簡短說明改了什麼），回報給人類，然後停下來
 等待進一步指示。

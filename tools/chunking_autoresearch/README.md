@@ -31,9 +31,9 @@ custom subagent 加上 `codex` 一起做了一次獨立審查，抓到「品質�
 
 ## 記分方式（第二版修正過的部分）
 
-第一版的 `cost` 只檢查 chunk 的欄位格式對不對，完全沒檢查「內容有沒有被
-保留下來」——實測發現一個把資料整個丟光的策略反而能拿到比 baseline
-更低的 cost（更「進步」）。
+第一版的 `cost`（後來改名成 `cost_time`，見下方說明）只檢查 chunk 的欄位
+格式對不對，完全沒檢查「內容有沒有被保留下來」——實測發現一個把資料整個
+丟光的策略反而能拿到比 baseline 更低的分數（更「進步」）。
 
 第二版加了**硬性門檻**：
 
@@ -41,9 +41,13 @@ custom subagent 加上 `codex` 一起做了一次獨立審查，抓到「品質�
 2. `content_coverage` 必須 ≥ 0.90（用固定長度字元 shingle 比對，原始文件
    內容至少要有 90% 真的出現在切出來的 chunk 裡）
 
-兩個門檻都過，`cost` 才是「執行時間相對 baseline 的倍數」，這時候才是真正
-在比速度。只要有一個沒過，`cost` 直接跳到 1000 以上，保證輸給任何有認真
-切的策略——「丟資料換速度」這條路已經被堵死。
+兩個門檻都過，`cost_time` 才是「執行時間相對 baseline 的倍數」，這時候才是
+真正在比速度。只要有一個沒過，`cost_time` 直接跳到 1000 以上，保證輸給任何
+有認真切的策略——「丟資料換速度」這條路已經被堵死。
+
+（欄位名稱特意叫 `cost_time` 不叫 `cost`：這是純粹的執行時間分數，不是
+金錢單位，這階段完全零成本、不呼叫任何付費 API，避免看到「cost」誤以為
+在花錢。）
 
 ## 快速開始
 
@@ -59,11 +63,11 @@ uv run harness.py
 
 ```
 ---
-cost:              1.012085
+cost_time:         0.988424
 quality_pass_rate: 1.000000
 content_coverage:  0.999582
 hard_gate_passed:  True
-seconds:           0.111329
+seconds:           0.108727
 baseline_seconds:  0.110000
 num_chunks:        257
 strategy_name:     baseline_structured_600_100
@@ -90,7 +94,7 @@ python dashboard.py
 
 瀏覽器打開 `http://127.0.0.1:8765/`，每 5 秒自動重新整理一次。畫面內容：
 
-- 每項指標（`cost`／`quality_pass_rate`／`content_coverage`／`seconds`）
+- 每項指標（`cost_time`／`quality_pass_rate`／`content_coverage`／`seconds`）
   的趨勢折線圖，跟相對第一筆 `keep` 紀錄的成長百分比
 - 總實驗數／keep／discard／crash 的統計
 - 最近 30 筆實驗紀錄的表格
