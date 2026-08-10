@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import html
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -191,8 +192,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Dashboard: http://127.0.0.1:{PORT}/  (Ctrl+C 結束)")
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((host, PORT), Handler)
+    print(f"Dashboard: http://{host}:{PORT}/  (Ctrl+C 結束)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
