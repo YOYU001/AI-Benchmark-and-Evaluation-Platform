@@ -21,7 +21,7 @@ import re
 
 from schema import Chunk, PageParseResult
 
-STRATEGY_NAME = "structured_600_100_listcomp_lines_zip_unpack"
+STRATEGY_NAME = "structured_600_100_monotonic_range_minmax_skip"
 
 CHUNK_SIZE = 600
 OVERLAP = 100
@@ -92,8 +92,12 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
         if not para_buf:
             return
         text = " ".join(t for t, _, _ in para_buf)
-        page_idx = [p for _, p, _ in para_buf]
-        pdf_pg = [p for _, _, p in para_buf]
+        # para_buf 是照 lines 的走訪順序累積的（lines 本身依 page_index 由小到
+        # 大排列），所以 page_index／pdf_page_number 在整個 buffer 裡是單調
+        # 不減的——range 的最小值一定是第一筆、最大值一定是最後一筆，不需要
+        # 另外 build 一份完整清單再呼叫 min()/max()。
+        page_idx_lo, page_idx_hi = para_buf[0][1], para_buf[-1][1]
+        pdf_pg_lo, pdf_pg_hi = para_buf[0][2], para_buf[-1][2]
         for piece in _pack_with_overlap(text, CHUNK_SIZE, OVERLAP):
             chunks.append(
                 Chunk(
@@ -102,8 +106,8 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
                     chunk_type="prose",
                     text=piece,
                     char_count=len(piece),
-                    page_index_range=(min(page_idx), max(page_idx)),
-                    pdf_page_number_range=(min(pdf_pg), max(pdf_pg)),
+                    page_index_range=(page_idx_lo, page_idx_hi),
+                    pdf_page_number_range=(pdf_pg_lo, pdf_pg_hi),
                 )
             )
         para_buf = []
@@ -113,8 +117,10 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
         if not table_buf:
             return
         text = title + "\n" + "\n".join(t for t, _, _ in table_buf)
-        page_idx = [p for _, p, _ in table_buf]
-        pdf_pg = [p for _, _, p in table_buf]
+        # 同樣道理：table_buf 也是照走訪順序累積的，單調不減，範圍直接取
+        # 頭尾兩筆即可，不用另外 build 清單再 min()/max()。
+        page_idx_lo, page_idx_hi = table_buf[0][1], table_buf[-1][1]
+        pdf_pg_lo, pdf_pg_hi = table_buf[0][2], table_buf[-1][2]
         chunks.append(
             Chunk(
                 chunk_id=f"{source_filename}::table::{len(chunks):04d}",
@@ -122,8 +128,8 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
                 chunk_type="table",
                 text=text,
                 char_count=len(text),
-                page_index_range=(min(page_idx), max(page_idx)),
-                pdf_page_number_range=(min(pdf_pg), max(pdf_pg)),
+                page_index_range=(page_idx_lo, page_idx_hi),
+                pdf_page_number_range=(pdf_pg_lo, pdf_pg_hi),
                 table_title=title,
             )
         )
