@@ -21,7 +21,7 @@ import re
 
 from schema import Chunk, PageParseResult
 
-STRATEGY_NAME = "structured_600_100_monotonic_range_minmax_skip"
+STRATEGY_NAME = "structured_600_100_regex_prefilter"
 
 CHUNK_SIZE = 600
 OVERLAP = 100
@@ -75,6 +75,12 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
     簡化而來。把每頁文字拆成一行一行，用縮排判斷段落邊界，用「中文日期行
     前面有沒有帶單位的欄位名稱」判斷是不是表格區塊，段落最後用
     CHUNK_SIZE/OVERLAP 打包成大小適中的 chunk。
+
+    這一輪優化：在呼叫三個編譯好的正則式（日期行／表格標題／單位括號）之前，
+    先用一個極便宜的字串檢查（`endswith`／`startswith`／`in`）擋掉絕大多數
+    一看就不可能符合的行，符合條件才真的丟給 regex 引擎判斷。三個正則式
+    本身的比對規則完全沒變，純粹是「大多數行提早跳過、少數行才動用 regex」
+    的短路優化，結果應該與改之前逐字元相同。
     """
     lines: list[tuple[str, int, int]] = [
         (raw.strip(), page.page_index, page.pdf_page_number)
@@ -143,9 +149,16 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
             i += 1
             continue
 
-        if not in_table and _DATE_LINE_RE.match(text):
+        # _DATE_LINE_RE 一定要求整行以「日」結尾（strip 過後不會有尾端空白）
+        # ——絕大多數段落文字不會以「日」結尾，用這個極便宜的字串比較先擋掉，
+        # 真正可能是日期行才丟給 regex 引擎做完整比對。
+        if not in_table and text.endswith("日") and _DATE_LINE_RE.match(text):
             lookback = para_buf[-6:]
-            has_unit = any(_UNIT_PAREN_RE.search(t) for t, _, _ in lookback)
+            # _UNIT_PAREN_RE 一定要求出現「(」才可能比對成功，先用 `in` 篩掉
+            # 不含括號的行，減少呼叫 regex.search 的次數。
+            has_unit = any(
+                "(" in t and _UNIT_PAREN_RE.search(t) for t, _, _ in lookback
+            )
             if has_unit:
                 # 表頭欄位名稱（例如「日期 需量(kW) 市電(kW) ...」）原本會被
                 # 從 para_buf 移除但沒有放進表格內容裡——直接遺失。現在改成
@@ -158,7 +171,10 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
                 continue
 
         if in_table:
-            if _TABLE_TITLE_RE.match(text):
+            # _TABLE_TITLE_RE 一定要求以「表」開頭，先用 startswith 擋掉大部分
+            # 表格內容行（真正的資料列不會以「表」開頭），只有真的可能是標題
+            # 的行才丟給 regex。
+            if text.startswith("表") and _TABLE_TITLE_RE.match(text):
                 flush_table(title=text)
                 in_table = False
                 i += 1
