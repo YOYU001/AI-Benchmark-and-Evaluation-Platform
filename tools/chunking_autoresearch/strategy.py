@@ -21,7 +21,7 @@ import re
 
 from schema import Chunk, PageParseResult
 
-STRATEGY_NAME = "baseline_structured_600_100"
+STRATEGY_NAME = "structured_600_100_listcomp_lines_zip_unpack"
 
 CHUNK_SIZE = 600
 OVERLAP = 100
@@ -76,10 +76,11 @@ def chunk(pages: list[PageParseResult], source_filename: str) -> list[Chunk]:
     前面有沒有帶單位的欄位名稱」判斷是不是表格區塊，段落最後用
     CHUNK_SIZE/OVERLAP 打包成大小適中的 chunk。
     """
-    lines: list[tuple[str, int, int]] = []
-    for page in pages:
-        for raw in page.text.splitlines():
-            lines.append((raw.strip(), page.page_index, page.pdf_page_number))
+    lines: list[tuple[str, int, int]] = [
+        (raw.strip(), page.page_index, page.pdf_page_number)
+        for page in pages
+        for raw in page.text.splitlines()
+    ]
 
     chunks: list[Chunk] = []
     para_buf: list[tuple[str, int, int]] = []
