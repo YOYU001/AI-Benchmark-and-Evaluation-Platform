@@ -188,6 +188,24 @@ d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數	2026
 （`results.tsv` 不要進版控，保持 untracked，跟 autoresearch 的做法一樣，
 `.gitignore` 已經排除它。）
 
+**`results.tsv` 一律讀寫這個固定絕對路徑**：
+
+```
+/workspace/projects/AI-Benchmark-and-Evaluation-Platform/tools/chunking_autoresearch/results.tsv
+```
+
+**不要用相對路徑（例如 `results.tsv` 或 `./results.tsv`）**，不管你目前實際上是在
+哪個 worktree（例如 `.worktrees/chunking-autoresearch/`）底下執行實驗迴圈、切換
+到哪個分支都一樣——一定要寫回上面這個固定路徑。
+
+原因：`results.tsv` 是刻意不進版控的檔案，git worktree 只會共用「有進版控的東西」
+（程式碼、`.git` 歷史），**不會共用沒進版控的檔案**——每個 worktree 的
+`tools/chunking_autoresearch/results.tsv` 實際上是各自獨立、互不相通的檔案。
+dashboard（`dashboard.py`）讀的是 main checkout 那份，如果你在 worktree 底下用
+相對路徑寫，資料只會留在 worktree 自己那份，dashboard 永遠看不到，人類也看不到
+你跑過的實驗——這個問題已經真實發生過一次（2026-08-11 那輪的 discard 紀錄整個
+消失在 dashboard 之外），所以務必用絕對路徑，不要再用相對路徑。
+
 ## 實驗迴圈
 
 實驗跑在專屬分支上（例如 `chunking-autoresearch/2026-08-07`）。這個 repo 在你
@@ -206,11 +224,13 @@ d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數	2026
 3. `git add strategy.py && git commit -m "描述這次嘗試"`
 4. 跑實驗：`python harness.py > run.log 2>&1`（全部導向檔案，不要用 tee，
    也不要讓輸出灌爆你自己的 context）。
-5. 讀結果：`grep "^cost_time:\|^quality_pass_rate:\|^content_coverage:" run.log`
+5. 讀結果：
+   `grep "^cost_time:\|^quality_pass_rate:\|^content_coverage:\|^redundancy_ratio:\|^timestamp:" run.log`
 6. grep 沒東西代表 crash 了。跑 `tail -n 50 run.log` 看 Python 錯誤訊息，
    試著修。修了幾次還是不行，就放棄這個想法，跳到步驟 7 用 crash 記錄，
    然後執行步驟 9 的丟棄動作。
-7. 把結果記進 tsv（提醒：不要把 `results.tsv` 加進 git）。
+7. 把結果記進 tsv——**寫進上面那個固定絕對路徑，不要寫進你目前 worktree 裡的
+   相對路徑版本**（提醒：不要把 `results.tsv` 加進 git）。
 8. 如果 `cost_time` 進步了（變低）**而且 `hard_gate_passed` 是 `True`**，保留
    這個 commit（status 記 `keep`），繼續往前推進分支——不需要做任何 git
    操作，這個 commit 已經是目前分支的 HEAD，直接進入下一輪。

@@ -49,6 +49,8 @@ RESULTS_TSV = Path(__file__).resolve().parent / "results.tsv"
 PORT = 8765
 REFRESH_SECONDS = 5
 NOTIFY_THRESHOLD_PCT = 20.0  # 要跟 notify.py 的 IMPROVEMENT_THRESHOLD_PCT 對齊
+HISTORY_ROW_LIMIT = 500  # 歷史紀錄表最多顯示幾筆（防呆上限，不是預期常態值）；
+# 超過 30 筆之後表格本身會在固定高度的框裡捲動，不會把整個頁面越撐越長
 
 SIDEBAR_ITEMS = [
     ("dashboard", "Dashboard", True),
@@ -563,8 +565,9 @@ def render_page(query: dict) -> str:
         f'<td class="status-{html.escape(r.get("status") or "")}">{html.escape(r.get("status") or "")}</td>'
         f'<td>{html.escape(r.get("cost_time") or "")}</td>'
         f'<td>{html.escape(r.get("description") or "")}</td></tr>'
-        for r in reversed(rows[-30:])
+        for r in reversed(rows[-HISTORY_ROW_LIMIT:])
     )
+    history_count = min(len(rows), HISTORY_ROW_LIMIT)
 
     date_label = f"{start or '最早'} ~ {end or '最新'}" if (start or end) else "全部日期"
 
@@ -606,6 +609,9 @@ h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
 .panel {{ background: var(--panel); border-radius: 16px; padding: 1.1rem 1.25rem; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(30,50,100,0.06); }}
 .chart-tooltip {{ position: fixed; display: none; background: #1f2937; color: #fff; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.78rem; white-space: pre-line; max-width: 280px; box-shadow: 0 4px 14px rgba(0,0,0,0.28); z-index: 999; pointer-events: none; line-height: 1.4; }}
 .chart-point {{ cursor: pointer; }}
+.history-scroll {{ max-height: 420px; overflow-y: auto; margin-top: 0.5rem; }}
+.history-scroll table {{ margin-top: 0; }}
+.history-scroll thead th {{ position: sticky; top: 0; background: var(--panel); z-index: 1; }}
 .grid-top {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }}
 .metric-card {{ display: block; text-decoration: none; color: var(--text); }}
 .metric-card-label {{ font-size: 0.8rem; color: var(--muted); }}
@@ -734,11 +740,13 @@ function hideTip() {{
       </div>
 
       <div class="panel" style="margin-top:1rem">
-        <div class="section-title">最近 30 筆紀錄</div>
-        <table id="historyTable">
-          <thead><tr><th>日期</th><th>commit</th><th>status</th><th>cost_time</th><th>description</th></tr></thead>
-          <tbody>{history_rows}</tbody>
-        </table>
+        <div class="section-title">歷史紀錄（顯示最近 {history_count} 筆，超過表格高度可滑動捲動）</div>
+        <div class="history-scroll">
+          <table id="historyTable">
+            <thead><tr><th>日期</th><th>commit</th><th>status</th><th>cost_time</th><th>description</th></tr></thead>
+            <tbody>{history_rows}</tbody>
+          </table>
+        </div>
       </div>
       <p class="footnote">每 {REFRESH_SECONDS} 秒自動重新整理。資料來源：results.tsv</p>
     </div>
