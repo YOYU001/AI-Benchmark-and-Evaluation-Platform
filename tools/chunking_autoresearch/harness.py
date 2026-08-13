@@ -23,6 +23,7 @@ import json
 import statistics
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -93,11 +94,32 @@ def _metadata_ok(chunk: Chunk) -> bool:
     return True
 
 
+def _split_table_chunk_ids(chunks: list[Chunk]) -> set[str]:
+    """回傳「疑似被腰斬」的 chunk_id 集合：同一份文件裡，緊接著的兩個 chunk
+    都是表格類型、且 table_title 相同，代表這其實是同一張表被硬拆成兩塊，
+    不是兩張各自完整的表格。"""
+    bad_ids: set[str] = set()
+    for prev, cur in zip(chunks, chunks[1:]):
+        if (
+            prev.source_filename == cur.source_filename
+            and prev.chunk_type == "table"
+            and cur.chunk_type == "table"
+            and prev.table_title
+            and prev.table_title == cur.table_title
+        ):
+            bad_ids.add(prev.chunk_id)
+            bad_ids.add(cur.chunk_id)
+    return bad_ids
+
+
 def score_chunks(chunks: list[Chunk]) -> float:
-    """回傳所有 chunk 裡通過結構檢查的比例，1.0 代表全部通過。"""
+    """回傳所有 chunk 裡通過結構檢查的比例，1.0 代表全部通過。結構檢查包含
+    每個 chunk 自己的格式（見 _metadata_ok）以及有沒有表格被腰斬（見
+    _split_table_chunk_ids）。"""
     if not chunks:
         return 0.0
-    ok_count = sum(1 for c in chunks if _metadata_ok(c))
+    split_ids = _split_table_chunk_ids(chunks)
+    ok_count = sum(1 for c in chunks if _metadata_ok(c) and c.chunk_id not in split_ids)
     return ok_count / len(chunks)
 
 
@@ -126,6 +148,26 @@ def content_coverage(source_pages: list[PageParseResult], chunks: list[Chunk]) -
     chunk_shingles = _shingles(chunk_text)
     covered = source_shingles & chunk_shingles
     return len(covered) / len(source_shingles)
+
+
+def redundancy_ratio(chunks: list[Chunk]) -> float:
+    """估算切出來的內容裡，有多少比例是「重複收錄」的。做法：把每個 chunk
+    的字元 shingle 攤平算出現次數，總出現次數扣掉「不重複的 shingle 種類數」，
+    再除以總出現次數——分子就是「超過第一次出現、算重複」的部分。
+
+    不跟固定字數的重疊量（例如 baseline 目前用的 100 字）比較，因為那只是
+    baseline 自己選的參數，不是放諸四海皆準的標準；agent 之後可能用完全不同
+    的切法。這裡只回傳「這次切出來的原始重複比例」這個數字本身，交給
+    dashboard 拿去跟 baseline 自己的第一筆結果比較（跟 cost_time 的處理方式
+    一樣），不在這裡預設「多少重複才算正常」。
+    """
+    all_shingles: list[str] = []
+    for c in chunks:
+        all_shingles.extend(_shingles(c.text))
+    if not all_shingles:
+        return 0.0
+    unique_count = len(set(all_shingles))
+    return (len(all_shingles) - unique_count) / len(all_shingles)
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +262,7 @@ def run() -> None:
 
     quality_pass_rate = score_chunks(all_chunks)
     avg_content_coverage = sum(coverage_scores) / len(coverage_scores) if coverage_scores else 0.0
+    avg_redundancy_ratio = redundancy_ratio(all_chunks)
     median_seconds = statistics.median(timings)
     normalized_seconds = median_seconds / BASELINE_SECONDS if BASELINE_SECONDS > 0 else median_seconds
 
@@ -237,11 +280,15 @@ def run() -> None:
     print(f"cost_time:         {cost_time:.6f}")
     print(f"quality_pass_rate: {quality_pass_rate:.6f}")
     print(f"content_coverage:  {avg_content_coverage:.6f}")
+    print(f"redundancy_ratio:  {avg_redundancy_ratio:.6f}")
     print(f"hard_gate_passed:  {hard_gate_passed}")
     print(f"seconds:           {median_seconds:.6f}")
     print(f"baseline_seconds:  {BASELINE_SECONDS:.6f}")
     print(f"num_chunks:        {len(all_chunks)}")
     print(f"strategy_name:     {getattr(strategy, 'STRATEGY_NAME', 'unnamed')}")
+    # 放在摘要最後一行，方便之後接新欄位到 results.tsv 時直接接在既有欄位後面，
+    # 不用重排前面欄位順序（dashboard 的日期篩選功能要用這個）。
+    print(f"timestamp:         {datetime.now(timezone.utc).isoformat()}")
 
 
 if __name__ == "__main__":

@@ -1,18 +1,35 @@
 """tools/chunking_autoresearch/dashboard.py
 
-本機即時儀表板：讀 `results.tsv`，畫出每個指標（cost_time／quality_pass_rate／
-content_coverage／seconds）隨時間變化的趨勢圖，以及相對第一筆 keep 紀錄的
-成長百分比。純標準函式庫實作，不加新的相依套件——圖表用 inline SVG 手動畫，
-不需要 matplotlib。
+NAS 上常駐的即時儀表板：讀 `results.tsv`，畫出四個指標（速度提升度／組裝正確率／
+內容保留率／內容擷取範圍精確度）隨時間變化的趨勢圖，外加距離 20% 通知門檻還差多少
+的進度條。純標準函式庫實作，不加新的相依套件——圖表用 inline SVG 手動畫，不需要
+matplotlib，日期篩選、指標切換都靠 GET query string 讓伺服器重新算，瀏覽器端只有
+搜尋歷史紀錄跟亮暗模式切換兩個小功能用原生 JS，沒有任何前端框架或建置流程。
 
-用瀏覽器打開 http://127.0.0.1:8765/ 看，頁面每 5 秒自動重新整理一次
-（`results.tsv` 每次都重新讀取，Hermes 一直在背景寫新的實驗結果，頁面就會
-一直更新）。
+用瀏覽器打開 http://127.0.0.1:8765/ 看，頁面每 5 秒自動重新整理一次（保留目前的
+URL query string，包含篩選中的日期範圍跟選定的指標）。`results.tsv` 每次都重新
+讀取，Hermes 一直在背景寫新的實驗結果，頁面就會一直更新。
 
-`results.tsv` 裡的每一筆紀錄都會保留（包含 discard／crash），只有失敗嘗試
-的 `strategy.py` 程式碼本身會被 `program.md` 的流程用 `git reset` 丟掉——
-log 保留完整歷史，才能在儀表板上看到「失敗過幾次、後來怎麼找到對的方向」
-的完整趨勢，不是只看到一路向上的成功曲線。
+`results.tsv` 裡的每一筆紀錄都會保留（包含 discard／crash），只有失敗嘗試的
+`strategy.py` 程式碼本身會被 `program.md` 的流程用 `git reset` 丟掉——log 保留
+完整歷史，才能在儀表板上看到「失敗過幾次、後來怎麼找到對的方向」的完整趨勢，不是
+只看到一路向上的成功曲線。
+
+四個指標的實際定義（跟 `harness.py` 對齊，避免望文生義；命名跟拆分方式參考了
+`docs/rag_chunking_evaluation_metrics_research.md` 的研究整理）：
+- 速度提升度（來自 `cost_time`）：跟 baseline 比，這次跑得快了幾 %。原始
+  `cost_time` 數字是「越低越好」，這裡換算成「提升 %」用正向、越高越好的方式呈現。
+- 組裝正確率（來自 `quality_pass_rate`）：每個 chunk 自己的格式對不對（分頁範圍、
+  字數、表格標題等），加上表格有沒有被腰斬（同一張表被硬拆成兩個 chunk）的檢查。
+  kept 紀錄規定一定要 100% 過關才留得下來，所以這條線幾乎都是一直線 100%，是正常
+  現象，不代表沒資料或圖表壞掉。
+- 內容保留率（來自 `content_coverage`）：測的是程式邏輯錯誤誤丟的資料比例——原始
+  文件的內容有多少比例還留在切出來的 chunk 裡，誤丟越多這個數字越低。只抓「有沒有
+  丟資料」，不抓「有沒有拿太多、重複、灌水」，那是下面內容擷取範圍精確度的工作。
+- 內容擷取範圍精確度（來自 `redundancy_ratio`）：跟 baseline 比，chunk 之間重複／
+  灌水的內容減少了幾 %。原始 `redundancy_ratio` 只是「這次切出來的重複比例」，沒有
+  固定門檻，因為切法不同、正常重疊量本來就不一樣，只跟 baseline 自己的數字比高低，
+  跟速度提升度是同一套處理邏輯。
 
 用法：python dashboard.py
 """
@@ -21,21 +38,33 @@ from __future__ import annotations
 
 import csv
 import html
+import os
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 RESULTS_TSV = Path(__file__).resolve().parent / "results.tsv"
 PORT = 8765
 REFRESH_SECONDS = 5
+NOTIFY_THRESHOLD_PCT = 20.0  # 要跟 notify.py 的 IMPROVEMENT_THRESHOLD_PCT 對齊
+HISTORY_ROW_LIMIT = 500  # 歷史紀錄表最多顯示幾筆（防呆上限，不是預期常態值）；
+# 超過 30 筆之後表格本身會在固定高度的框裡捲動，不會把整個頁面越撐越長
 
-# (欄位名稱, 顯示標籤, 數字越大是不是越好)
-METRICS = [
-    ("cost_time", "Cost Time（效能分數，數字越低越好——不是金錢單位，這階段完全零成本）", False),
-    ("quality_pass_rate", "Quality Pass Rate（越高越好）", True),
-    ("content_coverage", "Content Coverage（越高越好）", True),
-    ("seconds", "Seconds（越低越好）", False),
+SIDEBAR_ITEMS = [
+    ("dashboard", "Dashboard", True),
+    ("chat", "Chat", False),
+    ("user", "User", False),
+    ("board", "Board", False),
+    ("database", "資料庫查看", False),
+    ("setting", "Setting", False),
 ]
+
+
+# ---------------------------------------------------------------------------
+# 讀資料 / 解析
+# ---------------------------------------------------------------------------
 
 
 def _read_rows() -> list[dict]:
@@ -52,54 +81,318 @@ def _safe_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def _step_change_pct(prev: float, cur: float, higher_is_better: bool) -> float:
-    """相對「上一個 keep 點」的變化百分比，不是相對第一筆——每個點標的是
-    這一步本身有沒有進步，才回答得出「哪一輪貢獻了多少」。"""
-    if prev == 0:
-        return 0.0
-    raw = (cur - prev) / abs(prev) * 100
-    return raw if higher_is_better else -raw
+def _parse_ts(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
-def _sparkline_svg(
-    values: list[float], higher_is_better: bool, width: int = 560, height: int = 150
-) -> str:
+def _enrich(rows: list[dict]) -> list[dict]:
+    """幫每一列補上 parse 過的數字欄位跟時間戳記，缺 timestamp 的舊資料
+    （改欄位之前寫進去的紀錄）ts 會是 None，之後一律當「未知日期」處理。"""
+    out = []
+    for r in rows:
+        out.append(
+            {
+                **r,
+                "_cost_time": _safe_float(r.get("cost_time")),
+                "_quality_pass_rate": _safe_float(r.get("quality_pass_rate")),
+                "_content_coverage": _safe_float(r.get("content_coverage")),
+                "_redundancy_ratio": _safe_float(r.get("redundancy_ratio")),
+                "_seconds": _safe_float(r.get("seconds")),
+                "_ts": _parse_ts(r.get("timestamp")),
+            }
+        )
+    return out
+
+
+def _fmt_date(ts: Optional[datetime]) -> str:
+    return "未知日期" if ts is None else ts.strftime("%Y-%m-%d %H:%M")
+
+
+def _filter_by_date(rows: list[dict], start: str, end: str) -> list[dict]:
+    """沒有選日期範圍時回傳全部（含未知日期的舊資料）；一旦選了任一邊，未知日期
+    的舊資料就篩不到（沒有時間可以比對），這是使用者確認過的行為。"""
+    if not start and not end:
+        return rows
+    filtered = []
+    for r in rows:
+        ts = r["_ts"]
+        if ts is None:
+            continue
+        d = ts.date().isoformat()
+        if start and d < start:
+            continue
+        if end and d > end:
+            continue
+        filtered.append(r)
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# 指標定義
+# ---------------------------------------------------------------------------
+
+
+def _first_value(rows: list[dict], key: str) -> Optional[float]:
+    """從（未經日期篩選的）完整歷史裡找第一筆有值的紀錄，當作 baseline 用。
+    務必傳未篩選過的 rows 進來——如果傳篩選後的列表，日期篩選一旦排除掉真正的
+    第一筆實驗，篩選後的第一筆會被誤當成新的 baseline，導致同一筆實驗在篩選
+    前後顯示不同的進步幅度（QA／codex 審查抓到的問題）。"""
+    return next((r[key] for r in rows if r.get(key) is not None), None)
+
+
+def _speed_baseline(all_kept: list[dict]) -> Optional[float]:
+    return _first_value(all_kept, "_cost_time")
+
+
+def _speed_improvement_series(kept: list[dict], baseline: Optional[float]) -> list[Optional[float]]:
+    out = []
+    for r in kept:
+        v = r["_cost_time"]
+        if v is None or baseline is None or baseline == 0:
+            out.append(None)
+        else:
+            out.append((baseline - v) / baseline * 100)
+    return out
+
+
+def _coverage_baseline(all_kept: list[dict]) -> Optional[float]:
+    v = _first_value(all_kept, "_content_coverage")
+    return None if v is None else (1 - v) * 100
+
+
+def _coverage_improvement_series(kept: list[dict], baseline: Optional[float]) -> list[Optional[float]]:
+    """content_coverage 原始值是「保留率」，但概念上這裡真正在追蹤的是「誤丟率」
+    （= 1 - 保留率，越低越好）。用跟 baseline 比「差幾個百分點」（直接相減），不是
+    「差幾成」（除以 baseline 算比例）——因為 baseline 的誤丟率通常非常接近 0，
+    除法算比例會把一點點差距放大成離譜的數字（例如從 0.04% 變成 0.5%，算比例會
+    變成「差了1096%」），改成百分點的直接相減就穩定、看得懂多了。"""
+    out = []
+    for r in kept:
+        v = r["_content_coverage"]
+        if v is None or baseline is None:
+            out.append(None)
+        else:
+            out.append(baseline - (1 - v) * 100)
+    return out
+
+
+def _redundancy_baseline(all_kept: list[dict]) -> Optional[float]:
+    return _first_value(all_kept, "_redundancy_ratio")
+
+
+def _redundancy_improvement_series(kept: list[dict], baseline: Optional[float]) -> list[Optional[float]]:
+    """redundancy_ratio 原始值是「重複比例」，越低越好；這裡跟 baseline 自己的
+    第一筆結果比較，換算成「重複減少了幾 %」的正向數字，跟速度提升度同一套處理
+    方式——不跟固定門檻比，只跟 baseline 自己比。"""
+    out = []
+    for r in kept:
+        v = r["_redundancy_ratio"]
+        if v is None or baseline is None or baseline == 0:
+            out.append(None)
+        else:
+            out.append((baseline - v) / baseline * 100)
+    return out
+
+
+METRICS = {
+    "cost_time": {
+        "label": "速度提升度",
+        "desc": "跟 baseline 比，這次跑得快了幾 %（正向表示，越高越好）。",
+        "unit": "%",
+        "higher_is_better": True,
+        "color": "#4f8cff",
+        "baseline_relative": True,
+        "baseline_fn": _speed_baseline,
+        "series_fn": _speed_improvement_series,
+    },
+    "quality_pass_rate": {
+        "label": "組裝正確率",
+        "desc": (
+            "每個 chunk 自己的格式對不對（分頁範圍／字數／表格標題）以及表格有沒有被腰斬的檢查。"
+            "kept 紀錄規定一定要 100% 過關才留得下來，所以這條線幾乎都是一直線 100%——"
+            "這是正常現象，代表沒有任何一筆留下來的結果組裝出錯；真正因組裝錯誤被刷掉的嘗試，"
+            "會出現在下面的 discard 歷史紀錄，不會畫進這張圖。"
+        ),
+        "unit": "%",
+        "higher_is_better": True,
+        "color": "#8a7cff",
+        "baseline_fn": lambda all_kept: None,
+        "series_fn": lambda kept, baseline: [
+            None if r["_quality_pass_rate"] is None else r["_quality_pass_rate"] * 100 for r in kept
+        ],
+    },
+    "content_coverage": {
+        "label": "內容保留率",
+        "desc": (
+            "測的是程式邏輯錯誤誤丟的資料比例，跟 baseline 比，誤丟率少了幾個百分點"
+            "（正向表示，越高越好——用百分點直接相減，不是算比例，因為 baseline 的誤丟率通常"
+            "非常接近 0，算比例會被一點點差距放大成離譜的數字）。"
+        ),
+        "unit": " 個百分點",
+        "higher_is_better": True,
+        "color": "#f2b134",
+        "baseline_relative": True,
+        "baseline_fn": _coverage_baseline,
+        "series_fn": _coverage_improvement_series,
+    },
+    "redundancy_ratio": {
+        "label": "內容擷取範圍精確度",
+        "desc": "跟 baseline 比，chunk 之間重複／灌水的內容減少了幾 %（正向表示，越高越好）。",
+        "unit": "%",
+        "higher_is_better": True,
+        "color": "#2fbf8f",
+        "baseline_relative": True,
+        "baseline_fn": _redundancy_baseline,
+        "series_fn": _redundancy_improvement_series,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# SVG 圖表
+# ---------------------------------------------------------------------------
+
+
+def _mini_sparkline_svg(values: list[float], color: str, width: int = 220, height: int = 64) -> str:
     if not values:
-        return "<p>（還沒有資料）</p>"
-    padded_top = 28  # 給點上方的百分比標籤留空間
-    plot_height = height - padded_top
-    display_values = values * 2 if len(values) == 1 else values  # 只有一筆資料畫水平線，避免除以零
-    lo, hi = min(display_values), max(display_values)
+        return '<svg viewBox="0 0 220 64" width="100%" height="64"></svg>'
+    display = values * 2 if len(values) == 1 else values
+    lo, hi = min(display), max(display)
     span = hi - lo or 1.0
-    n = len(display_values)
+    n = len(display)
     step = width / max(n - 1, 1)
-    coords = [
-        (i * step, padded_top + plot_height - ((v - lo) / span) * plot_height)
-        for i, v in enumerate(display_values)
-    ]
-    color = "#4caf50" if higher_is_better else "#42a5f5"
+    pad = 6
+    plot_h = height - pad * 2
+    coords = [(i * step, pad + plot_h - ((v - lo) / span) * plot_h) for i, v in enumerate(display)]
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" preserveAspectRatio="none">'
+        f'<polyline fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" '
+        f'stroke-linejoin="round" points="{polyline}" />'
+        f"</svg>"
+    )
 
-    points_svg = []
-    for i, ((x, y), v) in enumerate(zip(coords, display_values)):
+
+def _big_chart_svg(
+    points: list[dict],
+    higher_is_better: bool,
+    unit: str,
+    accent_color: str,
+    grad_id: str,
+    baseline_relative: bool = False,
+    width: int = 760,
+    height: int = 320,
+) -> str:
+    """points: [{"value": float, "x_label": str, "commit": str, "description": str}, ...]"""
+    if not points:
+        return '<p class="empty">（還沒有資料）</p>'
+
+    # 左邊留白要跟著單位文字長度變，不然「個百分點」這種長單位的刻度數字會
+    # 跟左側直書的座標軸標題疊在一起（原本固定 60px 是抓「%」「s」這種短單位）。
+    left_pad, top_pad, right_pad, bottom_pad = 66 + len(unit) * 11, 20, 24, 44
+    plot_w = width - left_pad - right_pad
+    plot_h = height - top_pad - bottom_pad
+
+    values = [p["value"] for p in points]
+    lo, hi = min(values), max(values)
+    if lo == hi:
+        lo, hi = lo - 1, hi + 1
+    span = hi - lo
+    n = len(points)
+    step_x = plot_w / max(n - 1, 1)
+
+    def x_at(i: int) -> float:
+        return left_pad + i * step_x
+
+    def y_at(v: float) -> float:
+        return top_pad + plot_h - (v - lo) / span * plot_h
+
+    coords = [(x_at(i), y_at(p["value"])) for i, p in enumerate(points)]
+
+    grid = []
+    ticks = 4
+    for t in range(ticks + 1):
+        val = lo + span * t / ticks
+        y = y_at(val)
+        grid.append(
+            f'<line x1="{left_pad}" y1="{y:.1f}" x2="{width - right_pad}" y2="{y:.1f}" '
+            f'class="grid-line" />'
+            f'<text x="{left_pad - 8:.1f}" y="{y + 4:.1f}" font-size="11" class="axis-label" '
+            f'text-anchor="end">{val:.1f}{unit}</text>'
+        )
+
+    x_labels = []
+    label_every = max(1, n // 6)
+    for i, p in enumerate(points):
+        if i % label_every == 0 or i == n - 1:
+            x_labels.append(
+                f'<text x="{x_at(i):.1f}" y="{height - bottom_pad + 18:.1f}" font-size="10" '
+                f'class="axis-label" text-anchor="middle">{html.escape(p["x_label"])}</text>'
+            )
+
+    polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+    baseline_y = top_pad + plot_h
+    area_path = (
+        f"M{coords[0][0]:.1f},{baseline_y:.1f} "
+        + " ".join(f"L{x:.1f},{y:.1f}" for x, y in coords)
+        + f" L{coords[-1][0]:.1f},{baseline_y:.1f} Z"
+    )
+
+    point_svgs = []
+    for i, ((x, y), p) in enumerate(zip(coords, points)):
         if i == 0:
+            color = "#8fa3b8"
             label = "baseline"
         else:
-            pct = _step_change_pct(display_values[i - 1], v, higher_is_better)
-            label = f"{pct:+.1f}%"
-        # <title> 是瀏覽器原生 hover tooltip，不需要額外的 JS 套件
-        points_svg.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}">'
-            f"<title>第 {i + 1} 筆：{v:.6f}（{label}）</title>"
+            prev_val = points[i - 1]["value"]
+            diff = p["value"] - prev_val
+            improved = diff > 0 if higher_is_better else diff < 0
+            color = "#4caf50" if improved else ("#ef5350" if diff != 0 else "#8fa3b8")
+            if baseline_relative:
+                # 這幾個指標的數列本身已經是「跟 baseline 比的差距」，第一筆
+                # 恆為 0，再對這個數列算一次「相對前一點的比例」一樣會除以
+                # 接近 0 的分母、炸出離譜數字（跟之前修過的百分點問題同一類）。
+                # 直接顯示兩點間的差距（跟數列本身同單位），不要再換算成比例。
+                label = f"{diff:+.2f}{unit}"
+            else:
+                pct = 0.0 if prev_val == 0 else diff / abs(prev_val) * 100
+                label = f"{pct:+.1f}%"
+        tooltip_text = f"第 {i + 1} 筆（{p['commit']}）：{p['value']:.4f}{unit}（{label}）\n{p['description']}"
+        tooltip_attr = html.escape(tooltip_text).replace("\n", "&#10;")
+        point_svgs.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{color}" class="chart-point" '
+            f'data-tip="{tooltip_attr}" '
+            f'onmouseenter="showTip(event,this)" onmousemove="moveTip(event)" onmouseleave="hideTip()">'
             f"</circle>"
-            f'<text x="{x:.1f}" y="{max(y - 10, 10):.1f}" font-size="11" fill="{color}" '
-            f'text-anchor="middle">{html.escape(label)}</text>'
         )
+
+    y_axis_title = (
+        f'<text x="16" y="{top_pad + plot_h / 2:.1f}" font-size="11" class="axis-label" '
+        f'text-anchor="middle" transform="rotate(-90 16 {top_pad + plot_h / 2:.1f})">數值（{unit}）</text>'
+    )
+    x_axis_title = (
+        f'<text x="{left_pad + plot_w / 2:.1f}" y="{height - 4}" font-size="11" class="axis-label" '
+        f'text-anchor="middle">實驗次序（保留下來的嘗試，依時間先後）</text>'
+    )
 
     return (
         f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" role="img">'
-        f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{polyline}" />'
-        f"{''.join(points_svg)}"
+        f"<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">"
+        f'<stop offset="0%" stop-color="{accent_color}" stop-opacity="0.35" />'
+        f'<stop offset="100%" stop-color="{accent_color}" stop-opacity="0.02" />'
+        f"</linearGradient></defs>"
+        f"{''.join(grid)}"
+        f'<path d="{area_path}" fill="url(#{grad_id})" stroke="none" />'
+        f'<polyline fill="none" stroke="{accent_color}" stroke-width="3" stroke-linecap="round" '
+        f'stroke-linejoin="round" points="{polyline}" />'
+        f"{''.join(point_svgs)}"
+        f"{''.join(x_labels)}"
+        f"{y_axis_title}{x_axis_title}"
         f"</svg>"
     )
 
@@ -111,75 +404,366 @@ def _growth_pct(first: float, last: float, higher_is_better: bool) -> float:
     return raw if higher_is_better else -raw
 
 
-def render_page() -> str:
-    rows = _read_rows()
+# ---------------------------------------------------------------------------
+# 頁面組裝
+# ---------------------------------------------------------------------------
+
+
+def _sidebar_html(active_page: str) -> str:
+    items = []
+    for key, label, enabled in SIDEBAR_ITEMS:
+        classes = "nav-item"
+        if key == active_page:
+            classes += " active"
+        if not enabled:
+            classes += " disabled"
+            items.append(
+                f'<div class="{classes}" title="待開發">{html.escape(label)} '
+                f'<span class="badge-soon">待開發</span></div>'
+            )
+        else:
+            items.append(f'<a class="{classes}" href="/">{html.escape(label)}</a>')
+    return "".join(items)
+
+
+def _minicard_html(key: str, cfg: dict, series: list[Optional[float]], selected: bool, qs_keep: str) -> str:
+    clean = [v for v in series if v is not None]
+    if len(clean) >= 2:
+        if cfg.get("baseline_relative"):
+            # 這幾個指標的原始數列本來就是「跟 baseline 比的進步 %」，第一筆
+            # 永遠是 0，不能再對這個數列算一次成長率（會除以 0，永遠變成
+            # +0.0%）——直接拿最新一筆當成長徽章就好。
+            growth = clean[-1]
+        else:
+            growth = _growth_pct(clean[0], clean[-1], cfg["higher_is_better"])
+        growth_str = f"{growth:+.1f}{cfg['unit']}"
+        growth_class = "up" if growth >= 0 else "down"
+        latest = f"{clean[-1]:.2f}{cfg['unit']}"
+    elif len(clean) == 1:
+        growth_str = "（還沒有足夠資料比較）"
+        growth_class = ""
+        latest = f"{clean[0]:.2f}{cfg['unit']}"
+    else:
+        growth_str = "（尚無資料）"
+        growth_class = ""
+        latest = "—"
+
+    spark = _mini_sparkline_svg(clean, cfg["color"])
+    active_class = " active" if selected else ""
+    href = f"/?metric={key}{qs_keep}"
+    return (
+        f'<a class="metric-card{active_class}" href="{html.escape(href)}">'
+        f'<div class="metric-card-label">{html.escape(cfg["label"])}</div>'
+        f'<div class="metric-card-value">{latest}</div>'
+        f'<div class="metric-card-growth {growth_class}">{growth_str}</div>'
+        f'<div class="metric-card-spark">{spark}</div>'
+        f"</a>"
+    )
+
+
+def render_page(query: dict) -> str:
+    selected_metric = query.get("metric", ["cost_time"])[0]
+    if selected_metric not in METRICS:
+        selected_metric = "cost_time"
+    start = query.get("start", [""])[0]
+    end = query.get("end", [""])[0]
+
+    all_rows = _enrich(_read_rows())
+    # baseline 一律從「完整、未經日期篩選」的歷史裡算，日期篩選只決定要顯示
+    # 哪些點——不然只要篩選範圍剛好排除掉第一筆實驗，篩選後的第一筆就會被誤當
+    # 成新的 baseline，同一筆實驗在篩選前後會顯示不同的進步幅度（codex 審查
+    # 抓到的問題）。
+    all_kept = [r for r in all_rows if r.get("status") == "keep"]
+    rows = _filter_by_date(all_rows, start, end)
     kept = [r for r in rows if r.get("status") == "keep"]
 
-    sections = []
-    for key, label, higher_is_better in METRICS:
-        values = [v for v in (_safe_float(r.get(key)) for r in kept) if v is not None]
-        chart = _sparkline_svg(values, higher_is_better)
-        if len(values) >= 2:
-            growth = _growth_pct(values[0], values[-1], higher_is_better)
-            growth_str = f"{growth:+.1f}%"
-        else:
-            growth_str = "（還沒有足夠資料）"
-        sections.append(
-            f"<section><h2>{html.escape(label)}</h2>"
-            f"<p>相對第一筆 keep 紀錄的成長：<strong>{growth_str}</strong></p>"
-            f"{chart}</section>"
-        )
+    qs_keep = ""
+    if start:
+        qs_keep += f"&start={html.escape(start)}"
+    if end:
+        qs_keep += f"&end={html.escape(end)}"
 
+    # 每個指標的 baseline 都從 all_kept 算一次，series 才用（可能被日期篩選過的）
+    # kept 算要顯示的點。
+    metric_series: dict[str, list[Optional[float]]] = {}
+    for key, cfg in METRICS.items():
+        baseline = cfg["baseline_fn"](all_kept)
+        metric_series[key] = cfg["series_fn"](kept, baseline)
+
+    # --- 距離通知門檻 ---
+    speed_clean = [v for v in metric_series["cost_time"] if v is not None]
+    best_speed_pct = max(speed_clean) if speed_clean else 0.0
+    threshold_progress = max(0.0, min(100.0, best_speed_pct / NOTIFY_THRESHOLD_PCT * 100))
+    threshold_note = (
+        f"已達 {NOTIFY_THRESHOLD_PCT:.0f}% 通知門檻，等待新紀錄"
+        if best_speed_pct >= NOTIFY_THRESHOLD_PCT
+        else f"距離 {NOTIFY_THRESHOLD_PCT:.0f}% 通知門檻還差 {NOTIFY_THRESHOLD_PCT - best_speed_pct:.1f} 個百分點"
+    )
+
+    # --- 四個小卡片 ---
+    minicards = "".join(
+        _minicard_html(key, cfg, metric_series[key], key == selected_metric, qs_keep)
+        for key, cfg in METRICS.items()
+    )
+
+    # --- 中間大圖 ---
+    cfg = METRICS[selected_metric]
+    big_label, big_unit, big_higher, big_color = cfg["label"], cfg["unit"], cfg["higher_is_better"], cfg["color"]
+    series = metric_series[selected_metric]
+
+    big_points = [
+        {
+            "value": v,
+            "x_label": _fmt_date(r["_ts"])[:10] if r["_ts"] else f"#{i + 1}",
+            "commit": r.get("commit") or "",
+            "description": r.get("description") or "",
+        }
+        for i, (r, v) in enumerate(zip(kept, series))
+        if v is not None
+    ]
+    big_chart = _big_chart_svg(
+        big_points,
+        big_higher,
+        big_unit,
+        big_color,
+        f"chartGrad_{selected_metric}",
+        baseline_relative=cfg.get("baseline_relative", False),
+    )
+    big_desc = cfg["desc"]
+
+    # --- 右側統計 ---
     total = len(rows)
     kept_n = len(kept)
     discarded_n = sum(1 for r in rows if r.get("status") == "discard")
     crashed_n = sum(1 for r in rows if r.get("status") == "crash")
+    max_count = max(kept_n, discarded_n, crashed_n, 1)
 
-    history_rows = "".join(
-        f"<tr><td>{html.escape(r.get('commit', ''))}</td>"
-        f"<td>{html.escape(r.get('status', ''))}</td>"
-        f"<td>{html.escape(r.get('cost_time', ''))}</td>"
-        f"<td>{html.escape(r.get('description', ''))}</td></tr>"
-        for r in reversed(rows[-30:])
+    def _bar(label: str, count: int, color: str) -> str:
+        pct = count / max_count * 100
+        return (
+            f'<div class="stat-bar-row"><span class="stat-bar-label">{label}</span>'
+            f'<div class="stat-bar-track"><div class="stat-bar-fill" style="width:{pct:.0f}%;background:{color}"></div></div>'
+            f'<span class="stat-bar-count">{count}</span></div>'
+        )
+
+    stats_bars = (
+        _bar("keep", kept_n, "#4caf50") + _bar("discard", discarded_n, "#ffa726") + _bar("crash", crashed_n, "#ef5350")
     )
 
+    latest_seconds = kept[-1]["_seconds"] if kept and kept[-1]["_seconds"] is not None else None
+    latest_seconds_str = f"{latest_seconds:.3f} 秒" if latest_seconds is not None else "—"
+
+    # --- 歷史紀錄表 ---
+    # `csv.DictReader` 遇到「欄位數比表頭少」的資料列時，缺的欄位值是 None
+    # （restval 預設值），不是空字串——`r.get(key, "")` 只有在 key 不存在時才會
+    # 用到 default，key 存在但值是 None 時還是回傳 None，直接丟給 html.escape()
+    # 會炸掉。這裡一律用 `or ""` 把 None 轉成空字串，不管是 key 不存在還是值是
+    # None 都能安全處理，短列資料不會讓整頁掛掉。
+    history_rows = "".join(
+        f'<tr><td>{html.escape(_fmt_date(r["_ts"]))}</td>'
+        f'<td>{html.escape(r.get("commit") or "")}</td>'
+        f'<td class="status-{html.escape(r.get("status") or "")}">{html.escape(r.get("status") or "")}</td>'
+        f'<td>{html.escape(r.get("cost_time") or "")}</td>'
+        f'<td>{html.escape(r.get("description") or "")}</td></tr>'
+        for r in reversed(rows[-HISTORY_ROW_LIMIT:])
+    )
+    history_count = min(len(rows), HISTORY_ROW_LIMIT)
+
+    date_label = f"{start or '最早'} ~ {end or '最新'}" if (start or end) else "全部日期"
+
     return f"""<!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8">
+<html lang="zh-Hant" data-theme="light"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 <title>chunking-autoresearch 儀表板</title>
 <style>
-body {{ font-family: system-ui, sans-serif; margin: 2rem; background:#0b0f14; color:#e6edf3; }}
-h1 {{ font-size: 1.4rem; }}
-section {{ margin-bottom: 1.5rem; padding: 1rem; background:#111820; border-radius: 8px; }}
-table {{ border-collapse: collapse; width: 100%; }}
-td, th {{ border-bottom: 1px solid #263140; padding: 4px 8px; text-align: left; font-size: 0.85rem; }}
-.stats {{ display:flex; gap:1.5rem; margin-bottom:1.5rem; flex-wrap: wrap; }}
-.stats div {{ background:#111820; padding:0.75rem 1rem; border-radius:8px; }}
-</style></head>
-<body>
-<h1>chunking-autoresearch 儀表板</h1>
-<div class="stats">
-<div>總實驗數：{total}</div>
-<div>keep：{kept_n}</div>
-<div>discard：{discarded_n}</div>
-<div>crash：{crashed_n}</div>
+:root {{
+  --bg: #eef1fb; --panel: #ffffff; --sidebar: #3366ff; --sidebar-text: #d6e0ff;
+  --text: #16213a; --muted: #7a88a8; --accent: #3366ff; --chart-area: rgba(51,102,255,0.14);
+  --grid: #eef1fb; --border: #eaedf7;
+}}
+html[data-theme="dark"] {{
+  --bg: #0b0f14; --panel: #121a24; --sidebar: #0e1520; --sidebar-text: #a9b8cf;
+  --text: #e6edf3; --muted: #8695ab; --accent: #63a4ff; --chart-area: rgba(99,164,255,0.14);
+  --grid: #223142; --border: #223142;
+}}
+* {{ box-sizing: border-box; }}
+body {{ font-family: system-ui, -apple-system, "Noto Sans TC", sans-serif; margin: 0; background: var(--bg); color: var(--text); }}
+.layout {{ display: flex; min-height: 100vh; }}
+.sidebar {{ width: 200px; flex-shrink: 0; background: var(--sidebar); color: var(--sidebar-text); padding: 1.25rem 1rem; }}
+.sidebar-brand {{ font-weight: 700; font-size: 1.1rem; color: #fff; margin-bottom: 1.5rem; }}
+.nav-item {{ display: block; padding: 0.55rem 0.75rem; border-radius: 8px; color: var(--sidebar-text); text-decoration: none; margin-bottom: 0.25rem; font-size: 0.9rem; }}
+.nav-item.active {{ background: rgba(255,255,255,0.18); color: #fff; font-weight: 600; }}
+.nav-item.disabled {{ opacity: 0.5; display: flex; justify-content: space-between; align-items: center; cursor: default; }}
+.badge-soon {{ font-size: 0.65rem; background: rgba(255,255,255,0.15); padding: 0.1rem 0.4rem; border-radius: 6px; }}
+.main {{ flex: 1; min-width: 0; }}
+.topbar {{ display: flex; align-items: center; gap: 1rem; padding: 0.9rem 1.5rem; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }}
+.topbar input[type="text"], .topbar input[type="date"] {{ background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.7rem; color: var(--text); font-size: 0.85rem; }}
+.search-box {{ flex: 1; min-width: 160px; }}
+.date-form {{ display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--muted); }}
+.theme-toggle, .bell {{ background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.6rem; cursor: pointer; font-size: 0.9rem; color: var(--text); position: relative; }}
+.avatar {{ width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 600; }}
+.content {{ padding: 1.5rem; }}
+h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
+.subtitle {{ color: var(--muted); font-size: 0.85rem; margin-bottom: 1.25rem; }}
+.panel {{ background: var(--panel); border-radius: 16px; padding: 1.1rem 1.25rem; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(30,50,100,0.06); }}
+.chart-tooltip {{ position: fixed; display: none; background: #1f2937; color: #fff; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.78rem; white-space: pre-line; max-width: 280px; box-shadow: 0 4px 14px rgba(0,0,0,0.28); z-index: 999; pointer-events: none; line-height: 1.4; }}
+.chart-point {{ cursor: pointer; }}
+.history-scroll {{ max-height: 420px; overflow-y: auto; margin-top: 0.5rem; }}
+.history-scroll table {{ margin-top: 0; }}
+.history-scroll thead th {{ position: sticky; top: 0; background: var(--panel); z-index: 1; }}
+.grid-top {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }}
+.metric-card {{ display: block; text-decoration: none; color: var(--text); }}
+.metric-card-label {{ font-size: 0.8rem; color: var(--muted); }}
+.metric-card-value {{ font-size: 1.5rem; font-weight: 700; margin: 0.15rem 0; }}
+.metric-card-growth {{ font-size: 0.8rem; }}
+.metric-card-growth.up {{ color: #2e9e4a; }}
+.metric-card-growth.down {{ color: #e05353; }}
+.metric-card.active {{ outline: 2px solid var(--accent); }}
+.composite-panel {{ display: flex; justify-content: space-between; align-items: center; gap: 1.5rem; margin-bottom: 1rem; flex-wrap: wrap; }}
+.composite-score {{ font-size: 2.2rem; font-weight: 800; color: var(--accent); }}
+.progress-track {{ background: var(--grid); border-radius: 6px; height: 10px; width: 260px; overflow: hidden; }}
+.progress-fill {{ background: var(--accent); height: 100%; }}
+.body-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; align-items: start; }}
+.side-stack {{ display: flex; flex-direction: column; gap: 1rem; }}
+.stat-bar-row {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.8rem; }}
+.stat-bar-label {{ width: 56px; color: var(--muted); }}
+.stat-bar-track {{ flex: 1; background: var(--grid); border-radius: 6px; height: 8px; overflow: hidden; }}
+.stat-bar-fill {{ height: 100%; }}
+.stat-bar-count {{ width: 28px; text-align: right; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 0.75rem; }}
+td, th {{ border-bottom: 1px solid var(--border); padding: 5px 8px; text-align: left; font-size: 0.8rem; }}
+.status-keep {{ color: #2e9e4a; }}
+.status-discard {{ color: #d99a2b; }}
+.status-crash {{ color: #e05353; }}
+.grid-line {{ stroke: var(--grid); stroke-width: 1; }}
+.axis-label {{ fill: var(--muted); }}
+.empty {{ color: var(--muted); font-size: 0.85rem; }}
+.section-title {{ font-weight: 600; margin-bottom: 0.5rem; }}
+.footnote {{ color: var(--muted); font-size: 0.75rem; margin-top: 1rem; }}
+@media (max-width: 900px) {{
+  .layout {{ flex-direction: column; }}
+  .sidebar {{ width: 100%; display: flex; gap: 0.5rem; overflow-x: auto; }}
+  .grid-top {{ grid-template-columns: repeat(2, 1fr); }}
+  .body-grid {{ grid-template-columns: 1fr; }}
+}}
+</style>
+<script>
+(function() {{
+  var saved = localStorage.getItem('dashboard-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+}})();
+function toggleTheme() {{
+  var cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  var next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('dashboard-theme', next);
+}}
+function filterHistory(q) {{
+  q = q.toLowerCase();
+  document.querySelectorAll('#historyTable tbody tr').forEach(function(tr) {{
+    tr.style.display = tr.textContent.toLowerCase().indexOf(q) === -1 ? 'none' : '';
+  }});
+}}
+function showTip(evt, el) {{
+  var tip = document.getElementById('chartTooltip');
+  tip.textContent = el.getAttribute('data-tip');
+  tip.style.display = 'block';
+  moveTip(evt);
+}}
+function moveTip(evt) {{
+  var tip = document.getElementById('chartTooltip');
+  if (tip.style.display !== 'block') return;
+  var x = evt.clientX + 14, y = evt.clientY + 14;
+  var maxX = window.innerWidth - tip.offsetWidth - 10;
+  var maxY = window.innerHeight - tip.offsetHeight - 10;
+  tip.style.left = Math.max(4, Math.min(x, maxX)) + 'px';
+  tip.style.top = Math.max(4, Math.min(y, maxY)) + 'px';
+}}
+function hideTip() {{
+  document.getElementById('chartTooltip').style.display = 'none';
+}}
+</script>
+</head>
+<body onload="(function(){{var t=localStorage.getItem('dashboard-theme'); if(t) document.documentElement.setAttribute('data-theme', t);}})()">
+<div id="chartTooltip" class="chart-tooltip"></div>
+<div class="layout">
+  <nav class="sidebar">
+    <div class="sidebar-brand">chunking-autoresearch</div>
+    {_sidebar_html("dashboard")}
+  </nav>
+  <div class="main">
+    <div class="topbar">
+      <input class="search-box" type="text" placeholder="搜尋歷史紀錄（commit / 說明）" oninput="filterHistory(this.value)">
+      <form class="date-form" method="get">
+        <input type="hidden" name="metric" value="{html.escape(selected_metric)}">
+        日期：<input type="date" name="start" value="{html.escape(start)}" onchange="this.form.submit()">
+        ~ <input type="date" name="end" value="{html.escape(end)}" onchange="this.form.submit()">
+        <a href="/?metric={html.escape(selected_metric)}">全部</a>
+      </form>
+      <button class="bell" title="{html.escape(threshold_note)}">🔔</button>
+      <button class="theme-toggle" onclick="toggleTheme()">🌓</button>
+      <div class="avatar">YY</div>
+      <span style="font-size:0.85rem;color:var(--muted)">yoyu0326</span>
+    </div>
+    <div class="content">
+      <h1>Dashboard</h1>
+      <div class="subtitle">chunking-autoresearch 即時結果 · 目前顯示範圍：{html.escape(date_label)}</div>
+
+      <div class="panel composite-panel">
+        <div>
+          <div class="metric-card-label">{html.escape(threshold_note)}</div>
+          <div class="progress-track"><div class="progress-fill" style="width:{threshold_progress:.0f}%"></div></div>
+        </div>
+      </div>
+
+      <div class="grid-top">{minicards}</div>
+
+      <div class="body-grid">
+        <div class="panel">
+          <div class="section-title">{html.escape(big_label)}</div>
+          <div class="subtitle" style="margin-bottom:0.75rem">{html.escape(big_desc)}</div>
+          {big_chart}
+        </div>
+        <div class="side-stack">
+          <div class="panel">
+            <div class="section-title">實驗統計</div>
+            {stats_bars}
+            <div class="footnote">總實驗數：{total}</div>
+          </div>
+          <div class="panel">
+            <div class="section-title">本次執行資源</div>
+            <div class="footnote" style="font-size:0.85rem;color:var(--text)">最新一筆耗時：{latest_seconds_str}</div>
+            <div class="footnote" style="font-size:0.85rem;color:var(--text)">花費：$0.00（Phase 1 完全本機執行，零 API 成本）</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:1rem">
+        <div class="section-title">歷史紀錄（顯示最近 {history_count} 筆，超過表格高度可滑動捲動）</div>
+        <div class="history-scroll">
+          <table id="historyTable">
+            <thead><tr><th>日期</th><th>commit</th><th>status</th><th>cost_time</th><th>description</th></tr></thead>
+            <tbody>{history_rows}</tbody>
+          </table>
+        </div>
+      </div>
+      <p class="footnote">每 {REFRESH_SECONDS} 秒自動重新整理。資料來源：results.tsv</p>
+    </div>
+  </div>
 </div>
-{"".join(sections)}
-<section><h2>最近 30 筆紀錄</h2>
-<table><tr><th>commit</th><th>status</th><th>cost_time</th><th>description</th></tr>
-{history_rows}
-</table></section>
-<p style="opacity:.5">每 {REFRESH_SECONDS} 秒自動重新整理。資料來源：results.tsv</p>
 </body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path != "/":
+        parts = urlsplit(self.path)
+        if parts.path != "/":
             self.send_response(404)
             self.end_headers()
             return
-        body = render_page().encode("utf-8")
+        query = parse_qs(parts.query)
+        body = render_page(query).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -191,8 +775,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Dashboard: http://127.0.0.1:{PORT}/  (Ctrl+C 結束)")
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((host, PORT), Handler)
+    print(f"Dashboard: http://{host}:{PORT}/  (Ctrl+C 結束)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

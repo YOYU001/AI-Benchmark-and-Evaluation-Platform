@@ -120,19 +120,24 @@ uv run harness.py
 cost_time:         0.988424
 quality_pass_rate: 1.000000
 content_coverage:  0.999582
+redundancy_ratio:  0.031205
 hard_gate_passed:  True
 seconds:           0.108727
 baseline_seconds:  0.110000
 num_chunks:        257
 strategy_name:     baseline_structured_600_100
+timestamp:         2026-08-07T19:03:11.482013+00:00
 ```
 
-（以上是實際跑 baseline 的真實輸出，不是編出來的範例數字。）
+（除了新增的 `redundancy_ratio` 數字是示意值，其餘是實際跑 baseline 的真實輸出，
+不是編出來的範例數字。`redundancy_ratio` 是這次切出來的內容裡，有多少比例是重複
+收錄的字元 shingle——越低越好，不代表任何固定的「正常重疊量」，只跟 baseline 自己
+的數字比較高低。）
 
 用這個抓出關鍵指標：
 
 ```
-grep "^cost_time:" run.log
+grep "^cost_time:\|^timestamp:" run.log
 ```
 
 如果 `grep` 抓不到任何東西，代表這次執行失敗或逾時了（沒有印出摘要），
@@ -143,10 +148,12 @@ grep "^cost_time:" run.log
 每次實驗跑完，記錄進 `results.tsv`（tab 分隔，**不是逗號**，逗號在說明欄位裡
 會出問題）。
 
-表頭跟 7 個欄位：
+表頭跟 9 個欄位。**新欄位一律加在最後面，不要插在中間**——這樣舊資料列（欄位數比
+較少）在新表頭下，前面的欄位還是對得上，只有最後新加的欄位會是空的，dashboard
+才能正確判斷成「這幾欄無資料」，而不是把後面欄位的值全部錯位讀成別的意思：
 
 ```
-commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description
+commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio
 ```
 
 1. git commit hash（短版，7 碼）
@@ -157,19 +164,47 @@ commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description
 5. seconds——crash 的話填 `0.000000`
 6. status：`keep`、`discard`、或 `crash`
 7. 一句話說明這次嘗試了什麼
+8. timestamp——直接抄 `run.log` 裡 `harness.py` 印出來的 `timestamp:` 那一行
+   （ISO 8601 格式，例如 `2026-08-07T19:03:11.482013+00:00`）；crash、抓不到
+   摘要的情況下，改用 `git log -1 --format=%cI <commit>` 取那個 commit 的時間
+9. redundancy_ratio——crash 的話填 `0.000000`
 
 範例：
 
 ```
-commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description
-a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	baseline
-b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	改用更嚴格的表格偵測
-c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	改成過度激進的過濾，內容覆蓋率沒過門檻
-d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數
+commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio
+a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	baseline	2026-08-07T19:03:11+00:00	0.031205
+b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	改用更嚴格的表格偵測	2026-08-07T19:12:44+00:00	0.028000
+c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	改成過度激進的過濾，內容覆蓋率沒過門檻	2026-08-07T19:20:02+00:00	0.031000
+d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數	2026-08-07T19:25:19+00:00	0.000000
 ```
+
+**如果你發現既有的 `results.tsv` 表頭還是舊的 7 欄或 8 欄版本（沒有 `timestamp`
+或 `redundancy_ratio`）**：先手動把表頭那一行改成上面新的 9 欄版本，再繼續往下寫
+新的紀錄——不要動舊資料列本身（舊資料列維持原本的欄位數就好；因為新欄位都是加在
+最後面，舊資料列前面的欄位不會錯位，只有 `timestamp`／`redundancy_ratio` 這兩欄
+在舊資料列上會是空的，dashboard 那邊會正確當成「無資料」處理）。
 
 （`results.tsv` 不要進版控，保持 untracked，跟 autoresearch 的做法一樣，
 `.gitignore` 已經排除它。）
+
+**`results.tsv` 一律讀寫這個固定絕對路徑**：
+
+```
+/workspace/projects/AI-Benchmark-and-Evaluation-Platform/tools/chunking_autoresearch/results.tsv
+```
+
+**不要用相對路徑（例如 `results.tsv` 或 `./results.tsv`）**，不管你目前實際上是在
+哪個 worktree（例如 `.worktrees/chunking-autoresearch/`）底下執行實驗迴圈、切換
+到哪個分支都一樣——一定要寫回上面這個固定路徑。
+
+原因：`results.tsv` 是刻意不進版控的檔案，git worktree 只會共用「有進版控的東西」
+（程式碼、`.git` 歷史），**不會共用沒進版控的檔案**——每個 worktree 的
+`tools/chunking_autoresearch/results.tsv` 實際上是各自獨立、互不相通的檔案。
+dashboard（`dashboard.py`）讀的是 main checkout 那份，如果你在 worktree 底下用
+相對路徑寫，資料只會留在 worktree 自己那份，dashboard 永遠看不到，人類也看不到
+你跑過的實驗——這個問題已經真實發生過一次（2026-08-11 那輪的 discard 紀錄整個
+消失在 dashboard 之外），所以務必用絕對路徑，不要再用相對路徑。
 
 ## 實驗迴圈
 
@@ -189,11 +224,13 @@ d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數
 3. `git add strategy.py && git commit -m "描述這次嘗試"`
 4. 跑實驗：`python harness.py > run.log 2>&1`（全部導向檔案，不要用 tee，
    也不要讓輸出灌爆你自己的 context）。
-5. 讀結果：`grep "^cost_time:\|^quality_pass_rate:\|^content_coverage:" run.log`
+5. 讀結果：
+   `grep "^cost_time:\|^quality_pass_rate:\|^content_coverage:\|^redundancy_ratio:\|^timestamp:" run.log`
 6. grep 沒東西代表 crash 了。跑 `tail -n 50 run.log` 看 Python 錯誤訊息，
    試著修。修了幾次還是不行，就放棄這個想法，跳到步驟 7 用 crash 記錄，
    然後執行步驟 9 的丟棄動作。
-7. 把結果記進 tsv（提醒：不要把 `results.tsv` 加進 git）。
+7. 把結果記進 tsv——**寫進上面那個固定絕對路徑，不要寫進你目前 worktree 裡的
+   相對路徑版本**（提醒：不要把 `results.tsv` 加進 git）。
 8. 如果 `cost_time` 進步了（變低）**而且 `hard_gate_passed` 是 `True`**，保留
    這個 commit（status 記 `keep`），繼續往前推進分支——不需要做任何 git
    操作，這個 commit 已經是目前分支的 HEAD，直接進入下一輪。
