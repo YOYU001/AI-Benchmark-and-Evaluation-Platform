@@ -6,9 +6,10 @@ NAS 上常駐的即時儀表板：讀 `results.tsv`，畫出四個指標（速�
 matplotlib，日期篩選、指標切換都靠 GET query string 讓伺服器重新算，瀏覽器端只有
 搜尋歷史紀錄跟亮暗模式切換兩個小功能用原生 JS，沒有任何前端框架或建置流程。
 
-用瀏覽器打開 http://127.0.0.1:8765/ 看，頁面每 5 秒自動重新整理一次（保留目前的
-URL query string，包含篩選中的日期範圍跟選定的指標）。`results.tsv` 每次都重新
-讀取，Hermes 一直在背景寫新的實驗結果，頁面就會一直更新。
+用瀏覽器打開 http://127.0.0.1:8765/ 看。原本是每 5 秒自動整頁重新整理，但圖表變寬、
+變複雜之後這樣會很明顯地閃爍，改成不自動整理——`results.tsv` 每次請求都會重新讀取，
+用瀏覽器自己的重新整理（會保留目前的 URL query string，包含篩選中的日期範圍跟選定
+的指標）就能看到 Hermes 背景寫入的最新結果，不用另外做一個按鈕。
 
 `results.tsv` 裡的每一筆紀錄都會保留（包含 discard／crash），只有失敗嘗試的
 `strategy.py` 程式碼本身會被 `program.md` 的流程用 `git reset` 丟掉——log 保留
@@ -39,15 +40,15 @@ from __future__ import annotations
 import csv
 import html
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
+TAIWAN_TZ = timezone(timedelta(hours=8))
 RESULTS_TSV = Path(__file__).resolve().parent / "results.tsv"
 PORT = 8765
-REFRESH_SECONDS = 5
 NOTIFY_THRESHOLD_PCT = 20.0  # 要跟 notify.py 的 IMPROVEMENT_THRESHOLD_PCT 對齊
 HISTORY_ROW_LIMIT = 500  # 歷史紀錄表最多顯示幾筆（防呆上限，不是預期常態值）；
 # 超過 30 筆之後表格本身會在固定高度的框裡捲動，不會把整個頁面越撐越長
@@ -103,14 +104,27 @@ def _enrich(rows: list[dict]) -> list[dict]:
                 "_content_coverage": _safe_float(r.get("content_coverage")),
                 "_redundancy_ratio": _safe_float(r.get("redundancy_ratio")),
                 "_seconds": _safe_float(r.get("seconds")),
+                "_same_session_baseline_cost_time": _safe_float(r.get("same_session_baseline_cost_time")),
                 "_ts": _parse_ts(r.get("timestamp")),
             }
         )
     return out
 
 
+def _to_taiwan(ts: datetime) -> datetime:
+    """只有帶時區資訊（aware）的時間才能安全轉換，沒有時區資訊的舊資料維持原樣。"""
+    return ts.astimezone(TAIWAN_TZ) if ts.tzinfo is not None else ts
+
+
 def _fmt_date(ts: Optional[datetime]) -> str:
-    return "未知日期" if ts is None else ts.strftime("%Y-%m-%d %H:%M")
+    """統一換算成台灣時間再顯示。harness.py 正常寫入的 timestamp 是 UTC（結尾 +00:00，
+    來自 `datetime.now(timezone.utc).isoformat()`），但少數用 `git log --format=%cI`
+    補記的舊資料是本地時間（結尾 +08:00）——兩種格式如果不先統一轉成同一個時區就直接
+    印出來，會出現同一份歷史紀錄裡的時間互相對不齊、甚至讓人誤判成完全不合理的時間點
+    （例如把 UTC 的下午誤看成凌晨）。"""
+    if ts is None:
+        return "未知日期"
+    return _to_taiwan(ts).strftime("%Y-%m-%d %H:%M")
 
 
 def _filter_by_date(rows: list[dict], start: str, end: str) -> list[dict]:
@@ -123,7 +137,7 @@ def _filter_by_date(rows: list[dict], start: str, end: str) -> list[dict]:
         ts = r["_ts"]
         if ts is None:
             continue
-        d = ts.date().isoformat()
+        d = _to_taiwan(ts).date().isoformat()
         if start and d < start:
             continue
         if end and d > end:
@@ -147,6 +161,33 @@ def _first_value(rows: list[dict], key: str) -> Optional[float]:
 
 def _speed_baseline(all_kept: list[dict]) -> Optional[float]:
     return _first_value(all_kept, "_cost_time")
+
+
+def _same_session_pct(r: dict) -> Optional[float]:
+    """回傳這一筆「同時段重測基準」跟「這次 cost_time」比較出來的 %，
+    沒有資料就回傳 None。跟最原始 baseline 比的累積 % 會受機器負載波動
+    影響失真，這個數字排除了機器負載的干擾，比較準確反映單一這次改動
+    實際的效果。"""
+    base = r.get("_same_session_baseline_cost_time")
+    cur = r.get("_cost_time")
+    if base is None or cur is None or base == 0:
+        return None
+    return (base - cur) / base * 100
+
+
+def _same_session_note(r: dict) -> str:
+    """跟最原始 baseline 比的累積 % 會受機器負載波動影響失真（同一份程式碼，
+    機器忙的時候跑起來就是比較慢，看起來像退步）。Hermes 每輪決定 keep/discard
+    時，其實有另外在同一個時間窗口重新測過 attempt_base 的版本、排除掉機器負載
+    的干擾，這裡把那個「同時段公平比較」的數字顯示出來，比跟很久以前的歷史
+    baseline 比更準確反映「這次改動」實際的效果。舊資料沒有這個欄位就不顯示，
+    不強迫補資料。"""
+    base = r.get("_same_session_baseline_cost_time")
+    cur = r.get("_cost_time")
+    pct = _same_session_pct(r)
+    if pct is None:
+        return ""
+    return f"\n同時段重測基準：{base:.4f} → 本次：{cur:.4f}（{pct:+.1f}%，已排除機器負載雜訊）"
 
 
 def _speed_improvement_series(kept: list[dict], baseline: Optional[float]) -> list[Optional[float]]:
@@ -202,7 +243,13 @@ def _redundancy_improvement_series(kept: list[dict], baseline: Optional[float]) 
 METRICS = {
     "cost_time": {
         "label": "速度提升度",
-        "desc": "跟 baseline 比，這次跑得快了幾 %（正向表示，越高越好）。",
+        "desc": (
+            "跟最原始 baseline 比，這次跑得快了幾 %（正向表示，越高越好）——"
+            "但這是跟很久以前記錄的歷史數字比，機器負載如果在不同時段差很多，"
+            "這個累積 % 可能會失真（明明有進步卻顯示一大截負成長）。滑鼠移到"
+            "下面圖上的每個點，如果有「同時段重測基準」的資訊，那才是排除機器"
+            "負載干擾、比較準確反映這次改動實際效果的數字。"
+        ),
         "unit": "%",
         "higher_is_better": True,
         "color": "#4f8cff",
@@ -295,6 +342,17 @@ def _big_chart_svg(
     # 左邊留白要跟著單位文字長度變，不然「個百分點」這種長單位的刻度數字會
     # 跟左側直書的座標軸標題疊在一起（原本固定 60px 是抓「%」「s」這種短單位）。
     left_pad, top_pad, right_pad, bottom_pad = 66 + len(unit) * 11, 20, 24, 44
+
+    # 使用者明確要求：不管點數多少，圖表一律用固定像素寬（每個點留夠讓日期標籤
+    # 不會互相重疊的間距，不是把點擠更近），外層永遠包一層 overflow-x:auto 的
+    # 捲動容器——點數不夠多、寬度小於容器可視範圍時瀏覽器本來就不會生出捲軸
+    # （這是正常行為，不是沒做），但只要點數一多到超出可視範圍，捲軸機制保證
+    # 都在，不用另外判斷「需不需要」。
+    # 110px 是抓「YYYY-MM-DD」這種 10 字元日期標籤在 font-size 10 底下的寬度
+    # 再留一點間隙，兩個點的間距只要不小於這個數字，相鄰的日期標籤就不會重疊。
+    min_point_spacing = 110
+    width = max(width, left_pad + right_pad + max(len(points) - 1, 0) * min_point_spacing)
+
     plot_w = width - left_pad - right_pad
     plot_h = height - top_pad - bottom_pad
 
@@ -326,14 +384,37 @@ def _big_chart_svg(
             f'text-anchor="end">{val:.1f}{unit}</text>'
         )
 
+    # 置中對齊（text-anchor="middle"）的文字，中心點卡在最左/最右邊界上時，
+    # 會有將近一半的文字寬度超出 SVG 的 viewBox 範圍被裁掉——第一筆跟最後一筆
+    # 改成貼齊邊界內側對齊（start／end），不再置中，才不會被裁到看不全。
+    # min_point_spacing 本身已經保證點與點之間留夠標籤寬度，所以每個點都可以
+    # 直接標日期，不用再像以前那樣每隔幾個點才標一次（那是為了省空間，現在
+    # 反而讓標籤看起來稀疏又跳號，不需要了——寬度不夠看就交給橫向捲軸處理）。
     x_labels = []
-    label_every = max(1, n // 6)
     for i, p in enumerate(points):
-        if i % label_every == 0 or i == n - 1:
-            x_labels.append(
-                f'<text x="{x_at(i):.1f}" y="{height - bottom_pad + 18:.1f}" font-size="10" '
-                f'class="axis-label" text-anchor="middle">{html.escape(p["x_label"])}</text>'
-            )
+        if i == 0:
+            anchor = "start"
+        elif i == n - 1:
+            anchor = "end"
+        else:
+            anchor = "middle"
+        x_labels.append(
+            f'<text x="{x_at(i):.1f}" y="{height - bottom_pad + 18:.1f}" font-size="10" '
+            f'class="axis-label" text-anchor="{anchor}">{html.escape(p["x_label"])}</text>'
+        )
+
+    # baseline 參考線：這幾個指標的數列本身就是「跟 baseline 比的差距」，baseline
+    # 永遠對應數值 0（第一筆點本身就是 0），畫一條橫線讓其他點跟 baseline 的落差
+    # 一眼就看得出來，不用每次都對照最左邊那個點。
+    baseline_line = ""
+    if baseline_relative and lo <= 0 <= hi:
+        by = y_at(0)
+        baseline_line = (
+            f'<line x1="{left_pad}" y1="{by:.1f}" x2="{width - right_pad}" y2="{by:.1f}" '
+            f'stroke="#8fa3b8" stroke-width="1.5" stroke-dasharray="4,4" />'
+            f'<text x="{width - right_pad - 4:.1f}" y="{by - 6:.1f}" font-size="10" '
+            f'class="axis-label" text-anchor="end">baseline</text>'
+        )
 
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
     baseline_y = top_pad + plot_h
@@ -362,7 +443,10 @@ def _big_chart_svg(
             else:
                 pct = 0.0 if prev_val == 0 else diff / abs(prev_val) * 100
                 label = f"{pct:+.1f}%"
-        tooltip_text = f"第 {i + 1} 筆（{p['commit']}）：{p['value']:.4f}{unit}（{label}）\n{p['description']}"
+        tooltip_text = (
+            f"第 {i + 1} 筆（{p['commit']}）：{p['value']:.4f}{unit}（{label}）"
+            f"{p.get('extra_note', '')}\n{p['description']}"
+        )
         tooltip_attr = html.escape(tooltip_text).replace("\n", "&#10;")
         point_svgs.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{color}" class="chart-point" '
@@ -380,13 +464,18 @@ def _big_chart_svg(
         f'text-anchor="middle">實驗次序（保留下來的嘗試，依時間先後）</text>'
     )
 
-    return (
-        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" role="img">'
+    # SVG 一律用固定像素寬（不是 100%），外層 .chart-scroll 才有東西可以捲——
+    # 點數不夠多、寬度小於容器可視範圍時瀏覽器自然不會顯示捲軸，但捲動機制
+    # 本身一律都在，不看點數多寡切換模式。
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
+        f'style="display:block;min-width:{width}px">'
         f"<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">"
         f'<stop offset="0%" stop-color="{accent_color}" stop-opacity="0.35" />'
         f'<stop offset="100%" stop-color="{accent_color}" stop-opacity="0.02" />'
         f"</linearGradient></defs>"
         f"{''.join(grid)}"
+        f"{baseline_line}"
         f'<path d="{area_path}" fill="url(#{grad_id})" stroke="none" />'
         f'<polyline fill="none" stroke="{accent_color}" stroke-width="3" stroke-linecap="round" '
         f'stroke-linejoin="round" points="{polyline}" />'
@@ -395,6 +484,7 @@ def _big_chart_svg(
         f"{y_axis_title}{x_axis_title}"
         f"</svg>"
     )
+    return f'<div class="chart-scroll">{svg}</div>'
 
 
 def _growth_pct(first: float, last: float, higher_is_better: bool) -> float:
@@ -426,14 +516,23 @@ def _sidebar_html(active_page: str) -> str:
     return "".join(items)
 
 
-def _minicard_html(key: str, cfg: dict, series: list[Optional[float]], selected: bool, qs_keep: str) -> str:
+def _minicard_html(
+    key: str,
+    cfg: dict,
+    series: list[Optional[float]],
+    selected: bool,
+    qs_keep: str,
+    extra_line: str = "",
+) -> str:
     clean = [v for v in series if v is not None]
     if len(clean) >= 2:
         if cfg.get("baseline_relative"):
-            # 這幾個指標的原始數列本來就是「跟 baseline 比的進步 %」，第一筆
-            # 永遠是 0，不能再對這個數列算一次成長率（會除以 0，永遠變成
-            # +0.0%）——直接拿最新一筆當成長徽章就好。
-            growth = clean[-1]
+            # 這幾個指標的原始數列本來就是「跟 baseline 比的累積進步 %」，
+            # 大數字（metric-card-value）已經在顯示這個累積值了——小字徽章
+            # 改成「這一筆比上一筆 keep 又進步了幾個百分點」，用直接相減
+            # 就好（數列本身是可加減的百分點差距，不是比例，不會有除以 0
+            # 的問題），這樣兩個數字才各自有意義，不會重複顯示同一個東西。
+            growth = clean[-1] - clean[-2]
         else:
             growth = _growth_pct(clean[0], clean[-1], cfg["higher_is_better"])
         growth_str = f"{growth:+.1f}{cfg['unit']}"
@@ -451,11 +550,15 @@ def _minicard_html(key: str, cfg: dict, series: list[Optional[float]], selected:
     spark = _mini_sparkline_svg(clean, cfg["color"])
     active_class = " active" if selected else ""
     href = f"/?metric={key}{qs_keep}"
+    extra_line_html = (
+        f'<div class="metric-card-extra">{html.escape(extra_line)}</div>' if extra_line else ""
+    )
     return (
         f'<a class="metric-card{active_class}" href="{html.escape(href)}">'
         f'<div class="metric-card-label">{html.escape(cfg["label"])}</div>'
         f'<div class="metric-card-value">{latest}</div>'
         f'<div class="metric-card-growth {growth_class}">{growth_str}</div>'
+        f"{extra_line_html}"
         f'<div class="metric-card-spark">{spark}</div>'
         f"</a>"
     )
@@ -501,8 +604,24 @@ def render_page(query: dict) -> str:
     )
 
     # --- 四個小卡片 ---
+    # cost_time 卡片額外加一行「最新一筆同時段比較」——主要的累積 % 徽章跟
+    # 最原始 baseline 比，機器負載波動時容易失真；這行是排除負載干擾、只看
+    # 最新這一筆改動的準確數字，兩個一起顯示，不用只靠 tooltip 才看得到。
+    latest_same_session_pct = _same_session_pct(kept[-1]) if kept else None
+    cost_time_extra = (
+        f"最新一筆同時段比較：{latest_same_session_pct:+.1f}%"
+        if latest_same_session_pct is not None
+        else ""
+    )
     minicards = "".join(
-        _minicard_html(key, cfg, metric_series[key], key == selected_metric, qs_keep)
+        _minicard_html(
+            key,
+            cfg,
+            metric_series[key],
+            key == selected_metric,
+            qs_keep,
+            extra_line=cost_time_extra if key == "cost_time" else "",
+        )
         for key, cfg in METRICS.items()
     )
 
@@ -517,6 +636,7 @@ def render_page(query: dict) -> str:
             "x_label": _fmt_date(r["_ts"])[:10] if r["_ts"] else f"#{i + 1}",
             "commit": r.get("commit") or "",
             "description": r.get("description") or "",
+            "extra_note": _same_session_note(r) if selected_metric == "cost_time" else "",
         }
         for i, (r, v) in enumerate(zip(kept, series))
         if v is not None
@@ -574,7 +694,6 @@ def render_page(query: dict) -> str:
     return f"""<!doctype html>
 <html lang="zh-Hant" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 <title>chunking-autoresearch 儀表板</title>
 <style>
 :root {{
@@ -609,7 +728,11 @@ h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
 .panel {{ background: var(--panel); border-radius: 16px; padding: 1.1rem 1.25rem; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(30,50,100,0.06); }}
 .chart-tooltip {{ position: fixed; display: none; background: #1f2937; color: #fff; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.78rem; white-space: pre-line; max-width: 280px; box-shadow: 0 4px 14px rgba(0,0,0,0.28); z-index: 999; pointer-events: none; line-height: 1.4; }}
 .chart-point {{ cursor: pointer; }}
-.history-scroll {{ max-height: 420px; overflow-y: auto; margin-top: 0.5rem; }}
+.history-scroll {{ max-height: 420px; overflow-y: scroll; margin-top: 0.5rem; }}
+.chart-scroll {{ overflow-x: auto; padding-bottom: 12px; scrollbar-width: thin; }}
+.chart-scroll::-webkit-scrollbar {{ height: 7px; }}
+.chart-scroll::-webkit-scrollbar-track {{ background: transparent; }}
+.chart-scroll::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 4px; }}
 .history-scroll table {{ margin-top: 0; }}
 .history-scroll thead th {{ position: sticky; top: 0; background: var(--panel); z-index: 1; }}
 .grid-top {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }}
@@ -619,12 +742,14 @@ h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
 .metric-card-growth {{ font-size: 0.8rem; }}
 .metric-card-growth.up {{ color: #2e9e4a; }}
 .metric-card-growth.down {{ color: #e05353; }}
+.metric-card-extra {{ font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }}
 .metric-card.active {{ outline: 2px solid var(--accent); }}
 .composite-panel {{ display: flex; justify-content: space-between; align-items: center; gap: 1.5rem; margin-bottom: 1rem; flex-wrap: wrap; }}
 .composite-score {{ font-size: 2.2rem; font-weight: 800; color: var(--accent); }}
 .progress-track {{ background: var(--grid); border-radius: 6px; height: 10px; width: 260px; overflow: hidden; }}
 .progress-fill {{ background: var(--accent); height: 100%; }}
 .body-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; align-items: start; }}
+.body-grid > .panel {{ min-width: 0; }}
 .side-stack {{ display: flex; flex-direction: column; gap: 1rem; }}
 .stat-bar-row {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.8rem; }}
 .stat-bar-label {{ width: 56px; color: var(--muted); }}
@@ -683,6 +808,14 @@ function moveTip(evt) {{
 function hideTip() {{
   document.getElementById('chartTooltip').style.display = 'none';
 }}
+document.addEventListener('DOMContentLoaded', function() {{
+  // 資料點是舊到新由左到右排列，圖表捲動容器預設停在最左邊（最舊那筆），
+  // 使用者一打開頁面反而看不到最新結果，要自己往右捲——載入時直接捲到底，
+  // 預設就看得到最新一筆。
+  document.querySelectorAll('.chart-scroll').forEach(function(el) {{
+    el.scrollLeft = el.scrollWidth;
+  }});
+}});
 </script>
 </head>
 <body onload="(function(){{var t=localStorage.getItem('dashboard-theme'); if(t) document.documentElement.setAttribute('data-theme', t);}})()">
@@ -748,7 +881,7 @@ function hideTip() {{
           </table>
         </div>
       </div>
-      <p class="footnote">每 {REFRESH_SECONDS} 秒自動重新整理。資料來源：results.tsv</p>
+      <p class="footnote">按瀏覽器的重新整理即可看到最新結果。資料來源：results.tsv</p>
     </div>
   </div>
 </div>

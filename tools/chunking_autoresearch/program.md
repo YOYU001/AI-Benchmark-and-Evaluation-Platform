@@ -70,18 +70,67 @@ uv run harness.py
 付費 API。）`cost_time` 的計算方式：
 
 1. **先看硬性門檻（hard gate）**：`quality_pass_rate` 必須等於 1.0（所有
-   chunk 的欄位格式都合法），而且 `content_coverage` 必須 ≥ 0.90（原始文件
-   的內容至少有 90% 真的出現在你切出來的 chunk 裡）。
-2. **兩個門檻都過了**，`cost_time` 就是這次執行時間相對於 baseline 的倍數
+   chunk 的欄位格式都合法）、`content_coverage` 必須 ≥ 0.90（原始文件
+   的內容至少有 90% 真的出現在你切出來的 chunk 裡）、**單一 chunk 不能
+   佔同一份文件超過 50% 的字元數**（`MAX_CHUNK_SHARE_OF_DOCUMENT`，見下方
+   「2026-08-14 補」）、**單一 chunk 的絕對字元數不能超過 2000**
+   （`MAX_CHUNK_CHAR_COUNT`，見下方「2026-08-14 補二」），而且**重複收錄的
+   字元 shingle 比例不能超過 0.4**（`MAX_REDUNDANCY_RATIO`，見下方
+   「2026-08-14 補三」）。
+2. **五個門檻都過了**，`cost_time` 就是這次執行時間相對於 baseline 的倍數
    （`normalized_seconds`）——這時候才是真正在比「誰切得快」。
 3. **只要有一個門檻沒過**，`cost_time` 會被設成一個遠高於任何正常結果的數字
    （1000 起跳，看沒過門檻的程度往上加），保證輸給任何有認真切的策略。
 
 **這代表什麼**：不要想著「切少一點、切快一點」來取巧。`harness.py` 會
 用內容比對（比較切出來的 chunk 有沒有涵蓋到原始文件的內容）抓出「丟資料
-換取速度」這種投機做法，一旦被抓到，`cost_time` 會爆表，肯定比 baseline 差。
-真正能讓 `cost_time` 進步的路只有一條：**在保留完整內容的前提下，讓 chunking
-本身跑得更快，或是讓格式檢查更穩定地全數通過**。
+換取速度」這種投機做法，也會擋掉「整份文件包成一個 chunk、完全不做拆分」
+這種投機做法，一旦被抓到，`cost_time` 會爆表，肯定比 baseline 差。
+真正能讓 `cost_time` 進步的路只有一條：**在保留完整內容、也真的做到有意義
+的切分的前提下，讓 chunking 本身跑得更快，或是讓格式檢查更穩定地全數通過**。
+
+**2026-08-14 補（`MAX_CHUNK_SHARE_OF_DOCUMENT` 這道關卡的由來）**：一次
+四方 AI coding agent（Claude Code / Codex / Antigravity / Copilot）比較
+實驗中，Codex 把整份文件包成單一個 prose chunk，完全不做段落／表格拆分。
+這個做法讓 `content_coverage` 直接等於 1.0（內容一字不缺）、`quality_pass_rate`
+也合法過關（單一大 chunk 在結構上仍是合法的 chunk），而且因為省掉所有逐行
+解析與正則比對的工作，`cost_time` 反而名列前茅。這證明「內容有沒有保留」
+跟「有沒有真的做到有意義的切分」是兩件不同的事，原本的關卡只顧到前者。
+加了這道新關卡之後，同一個策略再測一次，`max_chunk_share` 會是 1.011487
+（單一 chunk 幾乎等於整份文件），直接判定 `hard_gate_passed = False`。
+
+**2026-08-14 補二（`MAX_CHUNK_CHAR_COUNT` 這道關卡的由來）**：修好上面那個
+漏洞後，code-review 跟 QA 兩位獨立審查員都各自指出同一個殘留漏洞——把
+文件無腦對半切成兩塊（不管段落／表格邊界），每塊剛好佔 50%，比例上卡在
+`MAX_CHUNK_SHARE_OF_DOCUMENT` 門檻**內**，一樣能通過關卡，但一樣沒有做到
+「有意義的切分」。單靠比例擋不住這招，因為比例可以刻意調整到剛好卡在門檻
+以內。加了這道絕對字元數上限（抓 baseline `CHUNK_SIZE`＝600 的約 3 倍，
+留給合理的策略調整空間）之後，實測「對半切」這招會產生 30147 字元的
+單一 chunk，遠超過 2000 的上限，直接判定 `hard_gate_passed = False`，
+`cost_time` 被灌到 2407.9。這兩道關卡（比例上限＋絕對字元數上限）互補：
+比例上限擋短文件被整份包成一個 chunk，絕對字元數上限擋長文件被切成
+少數幾塊粗暴的大 chunk，單獨一種都擋不住另一種情境。
+
+**2026-08-14 補三（`MAX_REDUNDANCY_RATIO` 這道關卡的由來）**：前兩道關卡都
+是擋「切太大」，code-review 獨立指出還有鏡像方向的漏洞沒堵——把文件切成
+大量極小、彼此高度重疊的 chunk（例如 sliding window、幾乎每隔幾個字就重疊
+一大段），quality_pass_rate、content_coverage、前兩道大小門檻全部能通過
+（每個 chunk 格式合法、內容也保留了、單一 chunk 也不大），但一樣不是有意義
+的切分。用 `redundancy_ratio`（重複收錄的字元 shingle 比例）當這道關卡——
+這個指標是決定性的（同一個策略重跑幾次數字完全一樣，不受計時雜訊影響），
+適合當硬性門檻用。baseline 實測 `redundancy_ratio = 0.117077`，門檻抓
+`MAX_REDUNDANCY_RATIO = 0.4`（約 3.4 倍，跟前面幾道門檻的抓法一致）。實測
+一個 50 字一塊、40 字重疊的碎片化測試策略：`redundancy_ratio = 0.438791`，
+超過門檻，`hard_gate_passed = False`，`cost_time` 被灌到 1005.4——而且這個
+測試策略的 `content_coverage`（0.985072）、chunk 大小都在前面幾道關卡的
+安全範圍內，證明這確實是一個前面三道關卡都擋不住、只有這道新關卡能擋住的
+獨立漏洞。
+
+**其他已知但目前選擇不修的落差**：`pdf_utils.py` 過去 `char_count` 用
+`len(text.strip())` 但 `text` 欄位存的是未 strip 的原文，兩者不一致，讓
+`max_chunk_share` 這類用 `char_count` 加總當分母的計算有約 1% 的系統性失真
+（QA 2026-08-14 審查抓到）。已修正為 `char_count = len(text)`，直接對應
+`text` 實際存的內容，不再用 `.strip()` 之後的字數。
 
 **簡潔原則**：條件都一樣的話，簡單的寫法比較好。一個很小的進步卻讓程式碼變
 得又醜又複雜，通常不值得。反過來說，刪掉一些東西還能維持一樣或更好的結果，
@@ -148,12 +197,12 @@ grep "^cost_time:\|^timestamp:" run.log
 每次實驗跑完，記錄進 `results.tsv`（tab 分隔，**不是逗號**，逗號在說明欄位裡
 會出問題）。
 
-表頭跟 9 個欄位。**新欄位一律加在最後面，不要插在中間**——這樣舊資料列（欄位數比
+表頭跟 10 個欄位。**新欄位一律加在最後面，不要插在中間**——這樣舊資料列（欄位數比
 較少）在新表頭下，前面的欄位還是對得上，只有最後新加的欄位會是空的，dashboard
 才能正確判斷成「這幾欄無資料」，而不是把後面欄位的值全部錯位讀成別的意思：
 
 ```
-commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio
+commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio	same_session_baseline_cost_time
 ```
 
 1. git commit hash（短版，7 碼）
@@ -168,22 +217,26 @@ commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	t
    （ISO 8601 格式，例如 `2026-08-07T19:03:11.482013+00:00`）；crash、抓不到
    摘要的情況下，改用 `git log -1 --format=%cI <commit>` 取那個 commit 的時間
 9. redundancy_ratio——crash 的話填 `0.000000`
+10. same_session_baseline_cost_time——見上方「實驗迴圈」步驟 7，這一輪
+    同時段重測 `attempt_base` 版本量到的 cost_time 中位數；crash 的話填空
+    （不要填 0，crash 那一輪根本沒有做這個重測，填空代表「無此資料」，
+    dashboard 會正確當成無資料處理，填 0 反而會被誤讀成有量到一個數字）
 
 範例：
 
 ```
-commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio
-a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	baseline	2026-08-07T19:03:11+00:00	0.031205
-b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	改用更嚴格的表格偵測	2026-08-07T19:12:44+00:00	0.028000
-c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	改成過度激進的過濾，內容覆蓋率沒過門檻	2026-08-07T19:20:02+00:00	0.031000
-d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數	2026-08-07T19:25:19+00:00	0.000000
+commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio	same_session_baseline_cost_time
+a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	baseline	2026-08-07T19:03:11+00:00	0.031205	
+b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	改用更嚴格的表格偵測	2026-08-07T19:12:44+00:00	0.028000	0.910000
+c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	改成過度激進的過濾，內容覆蓋率沒過門檻	2026-08-07T19:20:02+00:00	0.031000	1.050000
+d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數	2026-08-07T19:25:19+00:00	0.000000	
 ```
 
-**如果你發現既有的 `results.tsv` 表頭還是舊的 7 欄或 8 欄版本（沒有 `timestamp`
-或 `redundancy_ratio`）**：先手動把表頭那一行改成上面新的 9 欄版本，再繼續往下寫
-新的紀錄——不要動舊資料列本身（舊資料列維持原本的欄位數就好；因為新欄位都是加在
-最後面，舊資料列前面的欄位不會錯位，只有 `timestamp`／`redundancy_ratio` 這兩欄
-在舊資料列上會是空的，dashboard 那邊會正確當成「無資料」處理）。
+**如果你發現既有的 `results.tsv` 表頭還是舊的 7～9 欄版本（沒有 `timestamp`、
+`redundancy_ratio`，或 `same_session_baseline_cost_time`）**：先手動把表頭那一行
+改成上面新的 10 欄版本，再繼續往下寫新的紀錄——不要動舊資料列本身（舊資料列維持
+原本的欄位數就好；因為新欄位都是加在最後面，舊資料列前面的欄位不會錯位，只有缺的
+那幾欄在舊資料列上會是空的，dashboard 那邊會正確當成「無資料」處理）。
 
 （`results.tsv` 不要進版控，保持 untracked，跟 autoresearch 的做法一樣，
 `.gitignore` 已經排除它。）
@@ -222,19 +275,41 @@ dashboard（`dashboard.py`）讀的是 main checkout 那份，如果你在 workt
    相對位置會算錯。
 2. 對 `strategy.py` 動手——想一個實驗性的改法，直接改程式碼。
 3. `git add strategy.py && git commit -m "描述這次嘗試"`
-4. 跑實驗：`python harness.py > run.log 2>&1`（全部導向檔案，不要用 tee，
-   也不要讓輸出灌爆你自己的 context）。
+4. 跑實驗（這只是先抓一次當預覽，不是正式要記錄的數字）：
+   `python harness.py > run.log 2>&1`（全部導向檔案，不要用 tee，也不要讓
+   輸出灌爆你自己的 context）。
 5. 讀結果：
    `grep "^cost_time:\|^quality_pass_rate:\|^content_coverage:\|^redundancy_ratio:\|^timestamp:" run.log`
 6. grep 沒東西代表 crash 了。跑 `tail -n 50 run.log` 看 Python 錯誤訊息，
-   試著修。修了幾次還是不行，就放棄這個想法，跳到步驟 7 用 crash 記錄，
-   然後執行步驟 9 的丟棄動作。
-7. 把結果記進 tsv——**寫進上面那個固定絕對路徑，不要寫進你目前 worktree 裡的
-   相對路徑版本**（提醒：不要把 `results.tsv` 加進 git）。
-8. 如果 `cost_time` 進步了（變低）**而且 `hard_gate_passed` 是 `True`**，保留
-   這個 commit（status 記 `keep`），繼續往前推進分支——不需要做任何 git
-   操作，這個 commit 已經是目前分支的 HEAD，直接進入下一輪。
-9. 如果 `cost_time` 一樣或變差，或是 `hard_gate_passed` 是 `False`（status 記
+   試著修。修了幾次還是不行，就放棄這個想法，**不用做步驟 7 的同時段重測**，
+   直接跳到步驟 8 用 crash 記錄，然後執行步驟 10 的丟棄動作。
+7. **同時段重測 baseline（機器負載校正，keep/discard 判斷要用這個，不要
+   直接拿這次的 cost_time 跟歷史上最原始的 baseline 比；crash 的情況不用
+   做這步，見步驟 6）**：這台機器的負載會隨時段浮動，同一份程式碼在不同
+   時間跑，測出來的絕對秒數可能差到看起來像退步，其實只是那個時間點機器
+   比較忙。真正該比較的是「這次改動」跟「改動之前那個版本」**在同一個
+   時間窗口內**的表現，不是跟很久以前記錄的歷史數字比：
+   - 把 `strategy.py` 暫時還原成 `attempt_base` 那個版本（例如
+     `git show <attempt_base>:strategy.py > /tmp/attempt_base_strategy.py`，
+     暫時複製過去跑，跑完再換回來，不要用會動到 commit 歷史的方式），
+     **連續跑 3 次** `harness.py` 取 `cost_time` 的中位數，當作
+     `same_session_baseline_cost_time`。
+   - 換回這一輪真正要測的 `strategy.py`，**一樣連續跑 3 次**取中位數，
+     這一次的 `run.log` 才是正式版——**這一列要記進 tsv 的 `cost_time`、
+     `seconds`、`timestamp` 三個欄位，一律改用這裡（步驟 7）換回本輪版本
+     後正式測出來的 `run.log`，不要用步驟 4 那次預覽的數字**（步驟 4 的
+     `run.log` 只用來判斷有沒有 crash，抓到之後就作廢，不進 tsv）。
+   - 兩邊測試時間要盡量接近（中間不要插入其他長時間的操作），確保比較
+     的公平性。
+8. 把結果記進 tsv（含步驟 7 量到的 `same_session_baseline_cost_time`）——
+   **寫進上面那個固定絕對路徑，不要寫進你目前 worktree 裡的相對路徑版本**
+   （提醒：不要把 `results.tsv` 加進 git）。
+9. **用「這一輪的 cost_time」跟「步驟 7 量到的 same_session_baseline_cost_time」
+   比較**（不是跟歷史上最原始的 baseline 比）：如果進步了（變低）**而且
+   `hard_gate_passed` 是 `True`**，保留這個 commit（status 記 `keep`），
+   繼續往前推進分支——不需要做任何 git 操作，這個 commit 已經是目前分支
+   的 HEAD，直接進入下一輪。
+10. 如果 `cost_time` 一樣或變差，或是 `hard_gate_passed` 是 `False`（status 記
    `discard`），或是 crash 了（status 記 `crash`），執行：
    `git reset --hard <attempt_base>`（用步驟 1 記下的那個雜湊值，不是
    `HEAD^`）——精確回到這一輪開始之前的狀態。

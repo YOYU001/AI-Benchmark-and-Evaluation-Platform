@@ -14,6 +14,13 @@ agent（Hermes）絕對不能編輯這個檔案。
   3. 計時範圍排除 PDF 解析（固定成本、策略改不動），並且跑三次取中位數，
      降低單次執行的隨機雜訊。
 
+2026-08-14 補：四方 AI coding agent（Claude Code / Codex / Antigravity /
+Copilot）比較實驗中，Codex 把整份文件包成單一個 prose chunk（完全不做段落
+／表格拆分），結果 content_coverage 直接等於 1.0、quality_pass_rate 也合法
+過關，因為切法本身在結構上仍是合法的 chunk——這是先前 content coverage 這
+道關卡沒有堵住的新漏洞：只檢查「內容有沒有保留」，沒檢查「有沒有真的做到
+有意義的切分」。加了 MAX_CHUNK_SHARE_OF_DOCUMENT 這道新關卡堵住這個做法。
+
 用法：python harness.py（或 uv run harness.py）
 """
 
@@ -56,6 +63,38 @@ DOCUMENTS = [
 # 精細比較「哪個策略切得比較好」——切得好不好交給 quality_pass_rate。
 MIN_CONTENT_COVERAGE = 0.90
 SHINGLE_SIZE = 30
+
+# 單一 chunk 不能佔同一份文件超過這個比例的字元數，否則視為硬性失敗。
+# 防止「整份文件包成一個 chunk」這種沒有真正做到切分、卻能讓 content
+# coverage 直接滿分的取巧做法（2026-08-14 四方 AI 比較實驗中，Codex
+# 實際用這招鑽過了原本的關卡，詳見上方檔案說明）。
+MAX_CHUNK_SHARE_OF_DOCUMENT = 0.5
+
+# 單一 chunk 的絕對字元數上限，不管佔文件比例多少都不能超過。
+# MAX_CHUNK_SHARE_OF_DOCUMENT 單獨存在時，還是能被「把文件無腦對半切成兩塊
+# （不管段落／表格邊界）」這招繞過——兩塊各佔 50%，比例上剛好卡在門檻內，
+# 但一樣沒有做到「有意義的切分」。這裡的門檻抓 baseline CHUNK_SIZE（600）
+# 的約 3 倍，足以擋下「切成兩三塊超大 chunk」這種粗暴做法——本次測試文件
+# 字元數是 34910～59702，對半切出來的每塊都會遠遠超過這個上限。
+#
+# 實際安全邊際比「3 倍」聽起來的要窄：baseline 目前最大的單一 chunk（一個
+# 完整表格 chunk，因為表格不會被切開）實測是 1301 字元，離 2000 的門檻只有
+# 約 35% 的餘裕，不是 600 到 2000 之間的完整空間（overlap 打包＋表格整塊不
+# 拆，讓實際 chunk 大小比 CHUNK_SIZE 本身大不少）。如果之後想讓策略嘗試更大
+# 的 CHUNK_SIZE（例如 900 以上），很可能會直接撞上這道門檻，屆時要重新評估
+# 這個常數，不是 bug，是設計上已知的取捨。
+MAX_CHUNK_CHAR_COUNT = 2000
+
+# 切出來的內容裡，重複收錄的字元 shingle 比例不能超過這個上限，否則視為
+# 硬性失敗。前兩道關卡（MAX_CHUNK_SHARE_OF_DOCUMENT／MAX_CHUNK_CHAR_COUNT）
+# 擋的是「切太大」；這道關卡擋的是鏡像方向——「切太碎」：把文件切成大量
+# 極小、彼此高度重疊的 chunk，一樣能通過前面所有關卡（每個 chunk 格式合法、
+# 內容也都保留了），但同樣不是「有意義的切分」。redundancy_ratio 是決定性
+# 指標（不受計時雜訊影響，同一個策略重跑幾次數字完全一樣），適合當硬性
+# 門檻用。baseline 實測 redundancy_ratio＝0.117077，這裡抓約 3.4 倍當上限，
+# 跟 MAX_CHUNK_CHAR_COUNT 的「baseline 的 3 倍」抓法一致（2026-08-14 code
+# review 指出這個殘留方向，見下方「補三」）。
+MAX_REDUNDANCY_RATIO = 0.4
 
 # 硬性失敗（quality 或 coverage 沒過門檻）的 cost_time 基準值，遠高於任何正常
 # 執行結果，讓「投機取巧」永遠競爭不過「認真切但慢一點」。
@@ -148,6 +187,18 @@ def content_coverage(source_pages: list[PageParseResult], chunks: list[Chunk]) -
     chunk_shingles = _shingles(chunk_text)
     covered = source_shingles & chunk_shingles
     return len(covered) / len(source_shingles)
+
+
+def max_chunk_share(source_pages: list[PageParseResult], chunks: list[Chunk]) -> float:
+    """回傳這份文件裡，單一 chunk 的字元數佔原始文件總字元數的最高比例。
+
+    用比例而非絕對字數，是因為四份測試文件長短差很多，固定字數上限對短文件
+    太寬鬆、對長文件太嚴格；用比例才能公平地套用在不同大小的文件上。
+    """
+    source_char_count = sum(p.char_count for p in source_pages)
+    if source_char_count == 0 or not chunks:
+        return 0.0
+    return max(c.char_count for c in chunks) / source_char_count
 
 
 def redundancy_ratio(chunks: list[Chunk]) -> float:
@@ -254,19 +305,29 @@ def run() -> None:
     assert worker_output is not None
     all_chunks: list[Chunk] = []
     coverage_scores: list[float] = []
+    chunk_share_scores: list[float] = []
     for doc in worker_output:
         filename = doc["filename"]
         chunks = [_chunk_from_dict(c) for c in doc["chunks"]]
         all_chunks.extend(chunks)
         coverage_scores.append(content_coverage(pages_by_doc[filename], chunks))
+        chunk_share_scores.append(max_chunk_share(pages_by_doc[filename], chunks))
 
     quality_pass_rate = score_chunks(all_chunks)
     avg_content_coverage = sum(coverage_scores) / len(coverage_scores) if coverage_scores else 0.0
     avg_redundancy_ratio = redundancy_ratio(all_chunks)
+    worst_chunk_share = max(chunk_share_scores) if chunk_share_scores else 0.0
+    worst_chunk_char_count = max((c.char_count for c in all_chunks), default=0)
     median_seconds = statistics.median(timings)
     normalized_seconds = median_seconds / BASELINE_SECONDS if BASELINE_SECONDS > 0 else median_seconds
 
-    hard_gate_passed = quality_pass_rate >= 1.0 and avg_content_coverage >= MIN_CONTENT_COVERAGE
+    hard_gate_passed = (
+        quality_pass_rate >= 1.0
+        and avg_content_coverage >= MIN_CONTENT_COVERAGE
+        and worst_chunk_share <= MAX_CHUNK_SHARE_OF_DOCUMENT
+        and worst_chunk_char_count <= MAX_CHUNK_CHAR_COUNT
+        and avg_redundancy_ratio <= MAX_REDUNDANCY_RATIO
+    )
     if hard_gate_passed:
         cost_time = normalized_seconds
     else:
@@ -274,6 +335,9 @@ def run() -> None:
             HARD_FAILURE_BASE
             + (1 - avg_content_coverage) * 100
             + (1 - quality_pass_rate) * 100
+            + max(0.0, worst_chunk_share - MAX_CHUNK_SHARE_OF_DOCUMENT) * 100
+            + max(0.0, (worst_chunk_char_count - MAX_CHUNK_CHAR_COUNT) / MAX_CHUNK_CHAR_COUNT) * 100
+            + max(0.0, avg_redundancy_ratio - MAX_REDUNDANCY_RATIO) * 100
         )
 
     print("---")
@@ -281,6 +345,8 @@ def run() -> None:
     print(f"quality_pass_rate: {quality_pass_rate:.6f}")
     print(f"content_coverage:  {avg_content_coverage:.6f}")
     print(f"redundancy_ratio:  {avg_redundancy_ratio:.6f}")
+    print(f"max_chunk_share:   {worst_chunk_share:.6f}")
+    print(f"max_chunk_chars:   {worst_chunk_char_count}")
     print(f"hard_gate_passed:  {hard_gate_passed}")
     print(f"seconds:           {median_seconds:.6f}")
     print(f"baseline_seconds:  {BASELINE_SECONDS:.6f}")
