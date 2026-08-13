@@ -39,12 +39,13 @@ from __future__ import annotations
 import csv
 import html
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlsplit
 
+TAIWAN_TZ = timezone(timedelta(hours=8))
 RESULTS_TSV = Path(__file__).resolve().parent / "results.tsv"
 PORT = 8765
 REFRESH_SECONDS = 5
@@ -109,8 +110,20 @@ def _enrich(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _to_taiwan(ts: datetime) -> datetime:
+    """只有帶時區資訊（aware）的時間才能安全轉換，沒有時區資訊的舊資料維持原樣。"""
+    return ts.astimezone(TAIWAN_TZ) if ts.tzinfo is not None else ts
+
+
 def _fmt_date(ts: Optional[datetime]) -> str:
-    return "未知日期" if ts is None else ts.strftime("%Y-%m-%d %H:%M")
+    """統一換算成台灣時間再顯示。harness.py 正常寫入的 timestamp 是 UTC（結尾 +00:00，
+    來自 `datetime.now(timezone.utc).isoformat()`），但少數用 `git log --format=%cI`
+    補記的舊資料是本地時間（結尾 +08:00）——兩種格式如果不先統一轉成同一個時區就直接
+    印出來，會出現同一份歷史紀錄裡的時間互相對不齊、甚至讓人誤判成完全不合理的時間點
+    （例如把 UTC 的下午誤看成凌晨）。"""
+    if ts is None:
+        return "未知日期"
+    return _to_taiwan(ts).strftime("%Y-%m-%d %H:%M")
 
 
 def _filter_by_date(rows: list[dict], start: str, end: str) -> list[dict]:
@@ -123,7 +136,7 @@ def _filter_by_date(rows: list[dict], start: str, end: str) -> list[dict]:
         ts = r["_ts"]
         if ts is None:
             continue
-        d = ts.date().isoformat()
+        d = _to_taiwan(ts).date().isoformat()
         if start and d < start:
             continue
         if end and d > end:
@@ -295,6 +308,17 @@ def _big_chart_svg(
     # 左邊留白要跟著單位文字長度變，不然「個百分點」這種長單位的刻度數字會
     # 跟左側直書的座標軸標題疊在一起（原本固定 60px 是抓「%」「s」這種短單位）。
     left_pad, top_pad, right_pad, bottom_pad = 66 + len(unit) * 11, 20, 24, 44
+
+    # 使用者明確要求：不管點數多少，圖表一律用固定像素寬（每個點留夠讓日期標籤
+    # 不會互相重疊的間距，不是把點擠更近），外層永遠包一層 overflow-x:auto 的
+    # 捲動容器——點數不夠多、寬度小於容器可視範圍時瀏覽器本來就不會生出捲軸
+    # （這是正常行為，不是沒做），但只要點數一多到超出可視範圍，捲軸機制保證
+    # 都在，不用另外判斷「需不需要」。
+    # 110px 是抓「YYYY-MM-DD」這種 10 字元日期標籤在 font-size 10 底下的寬度
+    # 再留一點間隙，兩個點的間距只要不小於這個數字，相鄰的日期標籤就不會重疊。
+    min_point_spacing = 110
+    width = max(width, left_pad + right_pad + max(len(points) - 1, 0) * min_point_spacing)
+
     plot_w = width - left_pad - right_pad
     plot_h = height - top_pad - bottom_pad
 
@@ -326,14 +350,37 @@ def _big_chart_svg(
             f'text-anchor="end">{val:.1f}{unit}</text>'
         )
 
+    # 置中對齊（text-anchor="middle"）的文字，中心點卡在最左/最右邊界上時，
+    # 會有將近一半的文字寬度超出 SVG 的 viewBox 範圍被裁掉——第一筆跟最後一筆
+    # 改成貼齊邊界內側對齊（start／end），不再置中，才不會被裁到看不全。
+    # min_point_spacing 本身已經保證點與點之間留夠標籤寬度，所以每個點都可以
+    # 直接標日期，不用再像以前那樣每隔幾個點才標一次（那是為了省空間，現在
+    # 反而讓標籤看起來稀疏又跳號，不需要了——寬度不夠看就交給橫向捲軸處理）。
     x_labels = []
-    label_every = max(1, n // 6)
     for i, p in enumerate(points):
-        if i % label_every == 0 or i == n - 1:
-            x_labels.append(
-                f'<text x="{x_at(i):.1f}" y="{height - bottom_pad + 18:.1f}" font-size="10" '
-                f'class="axis-label" text-anchor="middle">{html.escape(p["x_label"])}</text>'
-            )
+        if i == 0:
+            anchor = "start"
+        elif i == n - 1:
+            anchor = "end"
+        else:
+            anchor = "middle"
+        x_labels.append(
+            f'<text x="{x_at(i):.1f}" y="{height - bottom_pad + 18:.1f}" font-size="10" '
+            f'class="axis-label" text-anchor="{anchor}">{html.escape(p["x_label"])}</text>'
+        )
+
+    # baseline 參考線：這幾個指標的數列本身就是「跟 baseline 比的差距」，baseline
+    # 永遠對應數值 0（第一筆點本身就是 0），畫一條橫線讓其他點跟 baseline 的落差
+    # 一眼就看得出來，不用每次都對照最左邊那個點。
+    baseline_line = ""
+    if baseline_relative and lo <= 0 <= hi:
+        by = y_at(0)
+        baseline_line = (
+            f'<line x1="{left_pad}" y1="{by:.1f}" x2="{width - right_pad}" y2="{by:.1f}" '
+            f'stroke="#8fa3b8" stroke-width="1.5" stroke-dasharray="4,4" />'
+            f'<text x="{width - right_pad - 4:.1f}" y="{by - 6:.1f}" font-size="10" '
+            f'class="axis-label" text-anchor="end">baseline</text>'
+        )
 
     polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
     baseline_y = top_pad + plot_h
@@ -380,13 +427,18 @@ def _big_chart_svg(
         f'text-anchor="middle">實驗次序（保留下來的嘗試，依時間先後）</text>'
     )
 
-    return (
-        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" role="img">'
+    # SVG 一律用固定像素寬（不是 100%），外層 .chart-scroll 才有東西可以捲——
+    # 點數不夠多、寬度小於容器可視範圍時瀏覽器自然不會顯示捲軸，但捲動機制
+    # 本身一律都在，不看點數多寡切換模式。
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
+        f'style="display:block;min-width:{width}px">'
         f"<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">"
         f'<stop offset="0%" stop-color="{accent_color}" stop-opacity="0.35" />'
         f'<stop offset="100%" stop-color="{accent_color}" stop-opacity="0.02" />'
         f"</linearGradient></defs>"
         f"{''.join(grid)}"
+        f"{baseline_line}"
         f'<path d="{area_path}" fill="url(#{grad_id})" stroke="none" />'
         f'<polyline fill="none" stroke="{accent_color}" stroke-width="3" stroke-linecap="round" '
         f'stroke-linejoin="round" points="{polyline}" />'
@@ -395,6 +447,7 @@ def _big_chart_svg(
         f"{y_axis_title}{x_axis_title}"
         f"</svg>"
     )
+    return f'<div class="chart-scroll">{svg}</div>'
 
 
 def _growth_pct(first: float, last: float, higher_is_better: bool) -> float:
@@ -609,7 +662,11 @@ h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
 .panel {{ background: var(--panel); border-radius: 16px; padding: 1.1rem 1.25rem; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(30,50,100,0.06); }}
 .chart-tooltip {{ position: fixed; display: none; background: #1f2937; color: #fff; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.78rem; white-space: pre-line; max-width: 280px; box-shadow: 0 4px 14px rgba(0,0,0,0.28); z-index: 999; pointer-events: none; line-height: 1.4; }}
 .chart-point {{ cursor: pointer; }}
-.history-scroll {{ max-height: 420px; overflow-y: auto; margin-top: 0.5rem; }}
+.history-scroll {{ max-height: 420px; overflow-y: scroll; margin-top: 0.5rem; }}
+.chart-scroll {{ overflow-x: auto; padding-bottom: 12px; scrollbar-width: thin; }}
+.chart-scroll::-webkit-scrollbar {{ height: 7px; }}
+.chart-scroll::-webkit-scrollbar-track {{ background: transparent; }}
+.chart-scroll::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 4px; }}
 .history-scroll table {{ margin-top: 0; }}
 .history-scroll thead th {{ position: sticky; top: 0; background: var(--panel); z-index: 1; }}
 .grid-top {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }}
@@ -625,6 +682,7 @@ h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
 .progress-track {{ background: var(--grid); border-radius: 6px; height: 10px; width: 260px; overflow: hidden; }}
 .progress-fill {{ background: var(--accent); height: 100%; }}
 .body-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; align-items: start; }}
+.body-grid > .panel {{ min-width: 0; }}
 .side-stack {{ display: flex; flex-direction: column; gap: 1rem; }}
 .stat-bar-row {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.8rem; }}
 .stat-bar-label {{ width: 56px; color: var(--muted); }}
@@ -683,6 +741,14 @@ function moveTip(evt) {{
 function hideTip() {{
   document.getElementById('chartTooltip').style.display = 'none';
 }}
+document.addEventListener('DOMContentLoaded', function() {{
+  // 資料點是舊到新由左到右排列，圖表捲動容器預設停在最左邊（最舊那筆），
+  // 使用者一打開頁面反而看不到最新結果，要自己往右捲——載入時直接捲到底，
+  // 預設就看得到最新一筆。
+  document.querySelectorAll('.chart-scroll').forEach(function(el) {{
+    el.scrollLeft = el.scrollWidth;
+  }});
+}});
 </script>
 </head>
 <body onload="(function(){{var t=localStorage.getItem('dashboard-theme'); if(t) document.documentElement.setAttribute('data-theme', t);}})()">

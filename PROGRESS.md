@@ -115,3 +115,14 @@
   - 使用者隨後改變主意，認為雲端備份還是必要、比較安心，請 Hermes 重建同一套排程並修好 `pyzipper` 缺失問題；手動觸發 + 正式排程觸發各驗證一次，皆完整跑完六個步驟（打包→加密→連 Drive→上傳→清理舊份→NAS 同步，因未設定 `NAS_BACKUP_DIR` 而略過最後一步）並確認成功上傳。
   - 討論中釐清一個常見誤解：「資料存在 NAS 上」（因為 Hermes 本來就跑在 NAS、資料目錄本身就在 NAS 硬碟裡）跟「有備份」是两回事，前者只有一份、NAS 硬碟本身若故障沒有第二份可救，這也是使用者決定保留 Google Drive 備份的原因。
 - 下一步：排程已上線、每天凌晨自動在隔離的 worktree 裡執行，GitHub push 權限也已打通，之後主要工作是定期查看 Telegram 通知/dashboard、等 20% 門檻觸發時人工 review 該次 PR（目前 Hermes 開分支後續 merge 流程還沒有實際跑過一次完整的「開 PR → Codex 審查 → 人工 merge」，值得找一次機會驗證）。
+
+## 2026-08-13
+
+- **`dashboard.py` 整頁重新設計**：仿 SaaSdunk 風格改成側邊欄＋頂欄＋卡片式排版，4 張可切換指標卡（速度提升度／組裝正確率／內容保留率／內容擷取範圍精確度）＋可放大的折線圖，加上自訂持久化 tooltip（不用原生 `<title>`，滑鼠移開才消失）、日期區間篩選、亮／暗主題切換、可捲動的歷史紀錄表（`HISTORY_ROW_LIMIT = 500`）。原本的「秒數」卡拿掉，改成新增的 `redundancy_ratio`（內容擷取範圍精確度）卡。
+- **`harness.py` 新增兩項邏輯**：`redundancy_ratio()`（用字元 shingle 重複次數估算 chunk 之間的內容重複率，越低越好，dashboard 端跟自己實驗歷史的第一筆 baseline 比較，不用固定字數門檻）；`_split_table_chunk_ids()`（偵測「同一份文件裡相鄰兩個 chunk 都是表格、標題相同」＝表格被腰斬，併入既有的 `quality_pass_rate`／組裝正確率检查，不獨立開新卡）。兩者皆手動單元測試過。
+- **派 10 個 research agent 調查業界／學界 chunking／RAG 評測標準**，整理成 `docs/rag_chunking_evaluation_metrics_research.md`（涵蓋 Recall/Precision/NDCG、RAGAS/TruLens/ARES、MoC 論文 Boundary Clarity、業界實務、LLM-as-Judge、NVIDIA 官方工具鏈、BEIR/KILT 等學術 benchmark、精準度/冗餘度量測、延遲成本評測、邊界完整性指標）。依研究結論明確**不做**「綜合分數」卡（研究本身就警告 composite score 容易掩蓋個別維度問題），維持四個指標分開呈現。
+- **部署前三方審查**（`code-review`／`qa` subagent ＋ 本機 `codex exec review --uncommitted`，三者平行執行），共抓到並修正：`csv.DictReader` 短列時 `r.get(key, "")` 防呆失效（`None` 值繞過 default）改用 `r.get(key) or ""`；新欄位 `redundancy_ratio` 原本插在欄位中間會讓舊資料列位移錯位，改成一律放在 tsv 最後一欄；baseline 原本在日期篩選**之後**才計算，導致同一筆實驗換篩選區間會顯示不同改善幅度，改成一律用未篩選的全部歷史算 baseline；大圖 tooltip 沒吃到 `baseline_relative` 參數、小卡成長徽章寫死 `%` 沒吃指標自己的單位，兩處皆修正。
+- **部署到 NAS**：commit+push 後由 Hermes 在 NAS 拉最新程式碼、重啟 `chunking-dashboard` 容器，確認新版生效、真實資料正確顯示。
+- **抓到並修正一個真正的資料遺失架構性 bug**：git worktree 不會共用 `.gitignore` 排除的未追蹤檔案（`results.tsv` 正是其中之一），導致 Hermes 在 `.worktrees/chunking-autoresearch/` 裡跑實驗寫出的 `results.tsv` 跟 main checkout（dashboard 實際讀取的那份）是完全不同的實體檔案，Hermes 排程寫的資料進不了 dashboard。修法：`program.md` 明確要求 `results.tsv` 一律讀寫固定絕對路徑 `/workspace/projects/AI-Benchmark-and-Evaluation-Platform/tools/chunking_autoresearch/results.tsv`，不用相對路徑，不管當下在哪個 worktree／分支底下執行。
+- **修好更深一層的同類問題**：光改 `program.md` 不夠，因為 `hermes cron` 排程本身另外存了一份獨立的 prompt（不會每次重新讀 `program.md`），沒同步更新導致 2026-08-12 晚上那次排程（commit `ae761f4`，discard）還是沒寫進 `results.tsv`（資料靠 git reflog + Hermes 自己的 cron 執行報告 md 檔搶救回來）。修法：直接用 `hermes cron edit` 把「固定絕對路徑」規則寫進 cron job 自己存的 prompt 內文，不再依賴間接委派給 `program.md`。**2026-08-12 19:05:54 UTC 的排程已重新驗證成功**：commit `145a958`（discard），成功寫入 main checkout 固定路徑，worktree 內沒有再產生副本，端到端流程確認打通。
+- 下一步：持續觀察每天凌晨的排程結果是否穩定正確寫入；`redundancy_ratio` 這個新指標目前資料量還很少，先累積數據，之後才有意義看趨勢；「開 PR → Codex 審查 → 人工 merge」完整流程仍未實測過一次，維持待辦。
