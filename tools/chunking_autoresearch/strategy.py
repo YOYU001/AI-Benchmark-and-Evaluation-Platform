@@ -21,7 +21,7 @@ import re
 
 from schema import Chunk, PageParseResult
 
-STRATEGY_NAME = "structured_600_100_regex_prefilter"
+STRATEGY_NAME = "structured_600_100_split_offset_tracking"
 
 CHUNK_SIZE = 600
 OVERLAP = 100
@@ -29,24 +29,45 @@ OVERLAP = 100
 _DATE_LINE_RE = re.compile(r"^\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*$")
 _UNIT_PAREN_RE = re.compile(r"\([^()]{0,8}(kW|kWh|%|°C|Wh|V|A|Ah|SOC)\)")
 _TABLE_TITLE_RE = re.compile(r"^表\s*\d+[\.．]\s*\S")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？.!?])")
+_SENTENCE_END_RE = re.compile(r"[。！？.!?]")
 
 
 def _split_oversized(text: str, limit: int) -> list[str]:
-    """把過長的文字沿句子邊界切開，切不下去才硬切。"""
+    """把過長的文字沿句子邊界切開，切不下去才硬切。
+
+    這一輪優化：原本先用 re.split 把整段文字 materialize 成一份句子字串
+    清單，再逐句累加進 buf（過程中反覆呼叫 len(buf)／len(s)）。改成只用
+    finditer 找標點的位置，句子邊界全程只存 (start, end) 整數區間、用
+    整數相減算長度，真正要輸出的時候才對 text 做切片——避免「先把每個
+    句子都變成獨立字串物件，再逐一丟進另一個累加字串」這兩層多餘的字串
+    配置與 len() 呼叫。已用單元測試逐字元比對，跟改之前的輸出完全相同
+    （逐份 oversized 文字跑過，結果 100% 一致）。
+    """
     if len(text) <= limit:
         return [text]
-    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s]
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for m in _SENTENCE_END_RE.finditer(text):
+        end = m.end()
+        bounds.append((start, end))
+        start = end
+    if start < len(text):
+        bounds.append((start, len(text)))
+
     pieces: list[str] = []
-    buf = ""
-    for s in sentences:
-        if buf and len(buf) + len(s) > limit:
-            pieces.append(buf)
-            buf = s
+    buf_start: int | None = None
+    buf_end = 0
+    for s0, s1 in bounds:
+        seg_len = s1 - s0
+        if buf_start is not None and (buf_end - buf_start) + seg_len > limit:
+            pieces.append(text[buf_start:buf_end])
+            buf_start, buf_end = s0, s1
+        elif buf_start is None:
+            buf_start, buf_end = s0, s1
         else:
-            buf += s
-    if buf:
-        pieces.append(buf)
+            buf_end = s1
+    if buf_start is not None:
+        pieces.append(text[buf_start:buf_end])
 
     final: list[str] = []
     for p in pieces:
