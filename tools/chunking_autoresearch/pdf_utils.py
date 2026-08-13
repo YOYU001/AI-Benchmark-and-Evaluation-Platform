@@ -22,7 +22,11 @@ def parse_pdf_pages(pdf_path: str) -> list[PageParseResult]:
                     page_index=page_index,
                     pdf_page_number=page_index + 1,
                     text=text,
-                    char_count=len(text.strip()),
+                    # char_count 一定要對應 text 實際存的內容（不 strip），
+                    # 否則任何拿 char_count 加總當分母、又跟 "".join(text)
+                    # 實際長度比較的地方（例如 harness.py 的 max_chunk_share）
+                    # 會有系統性落差（QA 2026-08-14 審查抓到約 1% 的失真）。
+                    char_count=len(text),
                 )
             )
     return results

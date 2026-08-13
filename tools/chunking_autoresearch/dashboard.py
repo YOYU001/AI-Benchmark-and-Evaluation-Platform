@@ -6,9 +6,10 @@ NAS 上常駐的即時儀表板：讀 `results.tsv`，畫出四個指標（速�
 matplotlib，日期篩選、指標切換都靠 GET query string 讓伺服器重新算，瀏覽器端只有
 搜尋歷史紀錄跟亮暗模式切換兩個小功能用原生 JS，沒有任何前端框架或建置流程。
 
-用瀏覽器打開 http://127.0.0.1:8765/ 看，頁面每 5 秒自動重新整理一次（保留目前的
-URL query string，包含篩選中的日期範圍跟選定的指標）。`results.tsv` 每次都重新
-讀取，Hermes 一直在背景寫新的實驗結果，頁面就會一直更新。
+用瀏覽器打開 http://127.0.0.1:8765/ 看。原本是每 5 秒自動整頁重新整理，但圖表變寬、
+變複雜之後這樣會很明顯地閃爍，改成不自動整理——`results.tsv` 每次請求都會重新讀取，
+用瀏覽器自己的重新整理（會保留目前的 URL query string，包含篩選中的日期範圍跟選定
+的指標）就能看到 Hermes 背景寫入的最新結果，不用另外做一個按鈕。
 
 `results.tsv` 裡的每一筆紀錄都會保留（包含 discard／crash），只有失敗嘗試的
 `strategy.py` 程式碼本身會被 `program.md` 的流程用 `git reset` 丟掉——log 保留
@@ -48,7 +49,6 @@ from urllib.parse import parse_qs, urlsplit
 TAIWAN_TZ = timezone(timedelta(hours=8))
 RESULTS_TSV = Path(__file__).resolve().parent / "results.tsv"
 PORT = 8765
-REFRESH_SECONDS = 5
 NOTIFY_THRESHOLD_PCT = 20.0  # 要跟 notify.py 的 IMPROVEMENT_THRESHOLD_PCT 對齊
 HISTORY_ROW_LIMIT = 500  # 歷史紀錄表最多顯示幾筆（防呆上限，不是預期常態值）；
 # 超過 30 筆之後表格本身會在固定高度的框裡捲動，不會把整個頁面越撐越長
@@ -104,6 +104,7 @@ def _enrich(rows: list[dict]) -> list[dict]:
                 "_content_coverage": _safe_float(r.get("content_coverage")),
                 "_redundancy_ratio": _safe_float(r.get("redundancy_ratio")),
                 "_seconds": _safe_float(r.get("seconds")),
+                "_same_session_baseline_cost_time": _safe_float(r.get("same_session_baseline_cost_time")),
                 "_ts": _parse_ts(r.get("timestamp")),
             }
         )
@@ -162,6 +163,33 @@ def _speed_baseline(all_kept: list[dict]) -> Optional[float]:
     return _first_value(all_kept, "_cost_time")
 
 
+def _same_session_pct(r: dict) -> Optional[float]:
+    """回傳這一筆「同時段重測基準」跟「這次 cost_time」比較出來的 %，
+    沒有資料就回傳 None。跟最原始 baseline 比的累積 % 會受機器負載波動
+    影響失真，這個數字排除了機器負載的干擾，比較準確反映單一這次改動
+    實際的效果。"""
+    base = r.get("_same_session_baseline_cost_time")
+    cur = r.get("_cost_time")
+    if base is None or cur is None or base == 0:
+        return None
+    return (base - cur) / base * 100
+
+
+def _same_session_note(r: dict) -> str:
+    """跟最原始 baseline 比的累積 % 會受機器負載波動影響失真（同一份程式碼，
+    機器忙的時候跑起來就是比較慢，看起來像退步）。Hermes 每輪決定 keep/discard
+    時，其實有另外在同一個時間窗口重新測過 attempt_base 的版本、排除掉機器負載
+    的干擾，這裡把那個「同時段公平比較」的數字顯示出來，比跟很久以前的歷史
+    baseline 比更準確反映「這次改動」實際的效果。舊資料沒有這個欄位就不顯示，
+    不強迫補資料。"""
+    base = r.get("_same_session_baseline_cost_time")
+    cur = r.get("_cost_time")
+    pct = _same_session_pct(r)
+    if pct is None:
+        return ""
+    return f"\n同時段重測基準：{base:.4f} → 本次：{cur:.4f}（{pct:+.1f}%，已排除機器負載雜訊）"
+
+
 def _speed_improvement_series(kept: list[dict], baseline: Optional[float]) -> list[Optional[float]]:
     out = []
     for r in kept:
@@ -215,7 +243,13 @@ def _redundancy_improvement_series(kept: list[dict], baseline: Optional[float]) 
 METRICS = {
     "cost_time": {
         "label": "速度提升度",
-        "desc": "跟 baseline 比，這次跑得快了幾 %（正向表示，越高越好）。",
+        "desc": (
+            "跟最原始 baseline 比，這次跑得快了幾 %（正向表示，越高越好）——"
+            "但這是跟很久以前記錄的歷史數字比，機器負載如果在不同時段差很多，"
+            "這個累積 % 可能會失真（明明有進步卻顯示一大截負成長）。滑鼠移到"
+            "下面圖上的每個點，如果有「同時段重測基準」的資訊，那才是排除機器"
+            "負載干擾、比較準確反映這次改動實際效果的數字。"
+        ),
         "unit": "%",
         "higher_is_better": True,
         "color": "#4f8cff",
@@ -409,7 +443,10 @@ def _big_chart_svg(
             else:
                 pct = 0.0 if prev_val == 0 else diff / abs(prev_val) * 100
                 label = f"{pct:+.1f}%"
-        tooltip_text = f"第 {i + 1} 筆（{p['commit']}）：{p['value']:.4f}{unit}（{label}）\n{p['description']}"
+        tooltip_text = (
+            f"第 {i + 1} 筆（{p['commit']}）：{p['value']:.4f}{unit}（{label}）"
+            f"{p.get('extra_note', '')}\n{p['description']}"
+        )
         tooltip_attr = html.escape(tooltip_text).replace("\n", "&#10;")
         point_svgs.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{color}" class="chart-point" '
@@ -479,14 +516,23 @@ def _sidebar_html(active_page: str) -> str:
     return "".join(items)
 
 
-def _minicard_html(key: str, cfg: dict, series: list[Optional[float]], selected: bool, qs_keep: str) -> str:
+def _minicard_html(
+    key: str,
+    cfg: dict,
+    series: list[Optional[float]],
+    selected: bool,
+    qs_keep: str,
+    extra_line: str = "",
+) -> str:
     clean = [v for v in series if v is not None]
     if len(clean) >= 2:
         if cfg.get("baseline_relative"):
-            # 這幾個指標的原始數列本來就是「跟 baseline 比的進步 %」，第一筆
-            # 永遠是 0，不能再對這個數列算一次成長率（會除以 0，永遠變成
-            # +0.0%）——直接拿最新一筆當成長徽章就好。
-            growth = clean[-1]
+            # 這幾個指標的原始數列本來就是「跟 baseline 比的累積進步 %」，
+            # 大數字（metric-card-value）已經在顯示這個累積值了——小字徽章
+            # 改成「這一筆比上一筆 keep 又進步了幾個百分點」，用直接相減
+            # 就好（數列本身是可加減的百分點差距，不是比例，不會有除以 0
+            # 的問題），這樣兩個數字才各自有意義，不會重複顯示同一個東西。
+            growth = clean[-1] - clean[-2]
         else:
             growth = _growth_pct(clean[0], clean[-1], cfg["higher_is_better"])
         growth_str = f"{growth:+.1f}{cfg['unit']}"
@@ -504,11 +550,15 @@ def _minicard_html(key: str, cfg: dict, series: list[Optional[float]], selected:
     spark = _mini_sparkline_svg(clean, cfg["color"])
     active_class = " active" if selected else ""
     href = f"/?metric={key}{qs_keep}"
+    extra_line_html = (
+        f'<div class="metric-card-extra">{html.escape(extra_line)}</div>' if extra_line else ""
+    )
     return (
         f'<a class="metric-card{active_class}" href="{html.escape(href)}">'
         f'<div class="metric-card-label">{html.escape(cfg["label"])}</div>'
         f'<div class="metric-card-value">{latest}</div>'
         f'<div class="metric-card-growth {growth_class}">{growth_str}</div>'
+        f"{extra_line_html}"
         f'<div class="metric-card-spark">{spark}</div>'
         f"</a>"
     )
@@ -554,8 +604,24 @@ def render_page(query: dict) -> str:
     )
 
     # --- 四個小卡片 ---
+    # cost_time 卡片額外加一行「最新一筆同時段比較」——主要的累積 % 徽章跟
+    # 最原始 baseline 比，機器負載波動時容易失真；這行是排除負載干擾、只看
+    # 最新這一筆改動的準確數字，兩個一起顯示，不用只靠 tooltip 才看得到。
+    latest_same_session_pct = _same_session_pct(kept[-1]) if kept else None
+    cost_time_extra = (
+        f"最新一筆同時段比較：{latest_same_session_pct:+.1f}%"
+        if latest_same_session_pct is not None
+        else ""
+    )
     minicards = "".join(
-        _minicard_html(key, cfg, metric_series[key], key == selected_metric, qs_keep)
+        _minicard_html(
+            key,
+            cfg,
+            metric_series[key],
+            key == selected_metric,
+            qs_keep,
+            extra_line=cost_time_extra if key == "cost_time" else "",
+        )
         for key, cfg in METRICS.items()
     )
 
@@ -570,6 +636,7 @@ def render_page(query: dict) -> str:
             "x_label": _fmt_date(r["_ts"])[:10] if r["_ts"] else f"#{i + 1}",
             "commit": r.get("commit") or "",
             "description": r.get("description") or "",
+            "extra_note": _same_session_note(r) if selected_metric == "cost_time" else "",
         }
         for i, (r, v) in enumerate(zip(kept, series))
         if v is not None
@@ -627,7 +694,6 @@ def render_page(query: dict) -> str:
     return f"""<!doctype html>
 <html lang="zh-Hant" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 <title>chunking-autoresearch 儀表板</title>
 <style>
 :root {{
@@ -676,6 +742,7 @@ h1 {{ font-size: 1.5rem; margin: 0 0 0.2rem; }}
 .metric-card-growth {{ font-size: 0.8rem; }}
 .metric-card-growth.up {{ color: #2e9e4a; }}
 .metric-card-growth.down {{ color: #e05353; }}
+.metric-card-extra {{ font-size: 0.72rem; color: var(--muted); margin-top: 0.15rem; }}
 .metric-card.active {{ outline: 2px solid var(--accent); }}
 .composite-panel {{ display: flex; justify-content: space-between; align-items: center; gap: 1.5rem; margin-bottom: 1rem; flex-wrap: wrap; }}
 .composite-score {{ font-size: 2.2rem; font-weight: 800; color: var(--accent); }}
@@ -814,7 +881,7 @@ document.addEventListener('DOMContentLoaded', function() {{
           </table>
         </div>
       </div>
-      <p class="footnote">每 {REFRESH_SECONDS} 秒自動重新整理。資料來源：results.tsv</p>
+      <p class="footnote">按瀏覽器的重新整理即可看到最新結果。資料來源：results.tsv</p>
     </div>
   </div>
 </div>
