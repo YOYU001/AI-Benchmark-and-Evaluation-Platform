@@ -352,8 +352,11 @@ def run() -> None:
     print(f"baseline_seconds:  {BASELINE_SECONDS:.6f}")
     print(f"num_chunks:        {len(all_chunks)}")
     print(f"strategy_name:     {getattr(strategy, 'STRATEGY_NAME', 'unnamed')}")
-    # 放在摘要最後一行，方便之後接新欄位到 results.tsv 時直接接在既有欄位後面，
-    # 不用重排前面欄位順序（dashboard 的日期篩選功能要用這個）。
+    # 這裡只是 stdout 摘要的列印順序，Hermes 用 grep "^timestamp:" 這種方式逐欄位
+    # 取值，不依賴印出的順序。results.tsv 實際的欄位順序是另一份獨立定義，見
+    # program.md「記錄結果」章節（2026-08-14 起 timestamp 在 tsv 裡固定第一欄、
+    # description 固定最後一欄，新增欄位一律要連同歷史資料一起 migrate，不能
+    # 再只是單純附加在最後面）。
     print(f"timestamp:         {datetime.now(timezone.utc).isoformat()}")
 
 
