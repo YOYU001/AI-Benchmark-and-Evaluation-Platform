@@ -276,9 +276,10 @@ METRICS = {
     "content_coverage": {
         "label": "內容保留率",
         "desc": (
-            "測的是程式邏輯錯誤誤丟的資料比例，跟 baseline 比，誤丟率少了幾個百分點"
-            "（正向表示，越高越好——用百分點直接相減，不是算比例，因為 baseline 的誤丟率通常"
-            "非常接近 0，算比例會被一點點差距放大成離譜的數字）。"
+            "卡片大數字是原始絕對保留率（最新一筆 keep 實際測到的比例，100% 代表完全沒丟東西，"
+            "跟「組裝正確率」卡片同一種呈現方式）。下面小字徽章跟折線圖走的是另一套算法：跟 "
+            "baseline 比，誤丟率少了幾個百分點（正向表示，越高越好——用百分點直接相減，不是算"
+            "比例，因為 baseline 的誤丟率通常非常接近 0，算比例會被一點點差距放大成離譜的數字）。"
         ),
         "unit": " 個百分點",
         "higher_is_better": True,
@@ -523,6 +524,7 @@ def _minicard_html(
     selected: bool,
     qs_keep: str,
     extra_line: str = "",
+    card_value_override: Optional[str] = None,
 ) -> str:
     clean = [v for v in series if v is not None]
     if len(clean) >= 2:
@@ -546,6 +548,14 @@ def _minicard_html(
         growth_str = "（尚無資料）"
         growth_class = ""
         latest = "—"
+
+    # content_coverage 這類指標的「大數字」改顯示原始絕對值（例如 99.96%），
+    # 不是跟 baseline 的差值——差值本身在還沒有任何嘗試動到內容邏輯時永遠是
+    # 0，看起來像沒資料，改成絕對值後 100% 才能直觀對應「完全沒丟東西」，
+    # 跟「組裝正確率」卡片的呈現方式一致。折線圖／成長徽章的趨勢邏輯不受影響，
+    # 只有這個 headline 數字換算法。
+    if card_value_override is not None:
+        latest = card_value_override
 
     spark = _mini_sparkline_svg(clean, cfg["color"])
     active_class = " active" if selected else ""
@@ -613,6 +623,12 @@ def render_page(query: dict) -> str:
         if latest_same_session_pct is not None
         else ""
     )
+    # content_coverage 的「大數字」改顯示原始絕對保留率（例如 99.96%），不是
+    # 跟 baseline 的差值，理由見 _minicard_html 裡的註解。
+    latest_coverage = kept[-1].get("_content_coverage") if kept else None
+    content_coverage_card_value = (
+        f"{latest_coverage * 100:.2f}%" if latest_coverage is not None else None
+    )
     minicards = "".join(
         _minicard_html(
             key,
@@ -621,6 +637,7 @@ def render_page(query: dict) -> str:
             key == selected_metric,
             qs_keep,
             extra_line=cost_time_extra if key == "cost_time" else "",
+            card_value_override=content_coverage_card_value if key == "content_coverage" else None,
         )
         for key, cfg in METRICS.items()
     )
