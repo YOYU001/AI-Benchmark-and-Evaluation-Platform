@@ -197,46 +197,51 @@ grep "^cost_time:\|^timestamp:" run.log
 每次實驗跑完，記錄進 `results.tsv`（tab 分隔，**不是逗號**，逗號在說明欄位裡
 會出問題）。
 
-表頭跟 10 個欄位。**新欄位一律加在最後面，不要插在中間**——這樣舊資料列（欄位數比
-較少）在新表頭下，前面的欄位還是對得上，只有最後新加的欄位會是空的，dashboard
-才能正確判斷成「這幾欄無資料」，而不是把後面欄位的值全部錯位讀成別的意思：
+表頭跟 10 個欄位。**`timestamp` 固定第一欄、`description` 固定最後一欄**（2026-08-14
+改成這樣，方便人類直接用純文字編輯器看原始 tsv 也不會被 description 這種長文字欄位
+把後面欄位擠到很遠的地方去）。**未來如果要再新增欄位，一律插在 `same_session_baseline_cost_time`
+跟 `description` 之間，不能加在檔案最後面**——因為最後一欄的位置永遠保留給
+`description`。這跟舊規則（新欄位單純附加在最後）不一樣：dashboard.py／mcp_server.py
+是用 `csv.DictReader` 照欄位名稱讀取、不是照位置，所以順序改變本身不會讓程式讀錯；
+但這代表**每次新增欄位都必須連同已存在的歷史資料列一起搬移欄位順序**（一次性
+migration，不能像以前那樣讓舊資料列直接沿用比較少的欄位數）：
 
 ```
-commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio	same_session_baseline_cost_time
+timestamp	commit	cost_time	quality_pass_rate	content_coverage	seconds	status	redundancy_ratio	same_session_baseline_cost_time	description
 ```
 
-1. git commit hash（短版，7 碼）
-2. 這次跑出來的 cost_time——crash 或逾時的話填 `999999.000000`（代表「無限差」，
-   不要填 0——`cost_time` 是越低越好，0 會被誤判成「最好的結果」）
-3. quality_pass_rate——crash 的話填 `0.000000`
-4. content_coverage——crash 的話填 `0.000000`
-5. seconds——crash 的話填 `0.000000`
-6. status：`keep`、`discard`、或 `crash`
-7. 一句話說明這次嘗試了什麼
-8. timestamp——直接抄 `run.log` 裡 `harness.py` 印出來的 `timestamp:` 那一行
+1. timestamp——直接抄 `run.log` 裡 `harness.py` 印出來的 `timestamp:` 那一行
    （ISO 8601 格式，例如 `2026-08-07T19:03:11.482013+00:00`）；crash、抓不到
    摘要的情況下，改用 `git log -1 --format=%cI <commit>` 取那個 commit 的時間
-9. redundancy_ratio——crash 的話填 `0.000000`
-10. same_session_baseline_cost_time——見上方「實驗迴圈」步驟 7，這一輪
-    同時段重測 `attempt_base` 版本量到的 cost_time 中位數；crash 的話填空
-    （不要填 0，crash 那一輪根本沒有做這個重測，填空代表「無此資料」，
-    dashboard 會正確當成無資料處理，填 0 反而會被誤讀成有量到一個數字）
+2. git commit hash（短版，7 碼）
+3. 這次跑出來的 cost_time——crash 或逾時的話填 `999999.000000`（代表「無限差」，
+   不要填 0——`cost_time` 是越低越好，0 會被誤判成「最好的結果」）
+4. quality_pass_rate——crash 的話填 `0.000000`
+5. content_coverage——crash 的話填 `0.000000`
+6. seconds——crash 的話填 `0.000000`
+7. status：`keep`、`discard`、或 `crash`
+8. redundancy_ratio——crash 的話填 `0.000000`
+9. same_session_baseline_cost_time——見上方「實驗迴圈」步驟 7，這一輪
+   同時段重測 `attempt_base` 版本量到的 cost_time 中位數；crash 的話填空
+   （不要填 0，crash 那一輪根本沒有做這個重測，填空代表「無此資料」，
+   dashboard 會正確當成無資料處理，填 0 反而會被誤讀成有量到一個數字）
+10. 一句話說明這次嘗試了什麼
 
 範例：
 
 ```
-commit	cost_time	quality_pass_rate	content_coverage	seconds	status	description	timestamp	redundancy_ratio	same_session_baseline_cost_time
-a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	baseline	2026-08-07T19:03:11+00:00	0.031205	
-b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	改用更嚴格的表格偵測	2026-08-07T19:12:44+00:00	0.028000	0.910000
-c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	改成過度激進的過濾，內容覆蓋率沒過門檻	2026-08-07T19:20:02+00:00	0.031000	1.050000
-d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	overlap 設成負數	2026-08-07T19:25:19+00:00	0.000000	
+timestamp	commit	cost_time	quality_pass_rate	content_coverage	seconds	status	redundancy_ratio	same_session_baseline_cost_time	description
+2026-08-07T19:03:11+00:00	a1b2c3d	1.012085	1.000000	0.999582	0.111329	keep	0.031205		baseline
+2026-08-07T19:12:44+00:00	b2c3d4e	0.870000	1.000000	0.995000	0.096000	keep	0.028000	0.910000	改用更嚴格的表格偵測
+2026-08-07T19:20:02+00:00	c3d4e5f	1075.000000	1.000000	0.250000	0.085000	discard	0.031000	1.050000	改成過度激進的過濾，內容覆蓋率沒過門檻
+2026-08-07T19:25:19+00:00	d4e5f6g	999999.000000	0.000000	0.000000	0.000000	crash	0.000000		overlap 設成負數
 ```
 
-**如果你發現既有的 `results.tsv` 表頭還是舊的 7～9 欄版本（沒有 `timestamp`、
-`redundancy_ratio`，或 `same_session_baseline_cost_time`）**：先手動把表頭那一行
-改成上面新的 10 欄版本，再繼續往下寫新的紀錄——不要動舊資料列本身（舊資料列維持
-原本的欄位數就好；因為新欄位都是加在最後面，舊資料列前面的欄位不會錯位，只有缺的
-那幾欄在舊資料列上會是空的，dashboard 那邊會正確當成「無資料」處理）。
+**如果你發現既有的 `results.tsv` 表頭還是舊順序（`commit` 開頭、`description` 在
+中間）**：這是 2026-08-14 之前的舊資料，不要自己即興搬移——這件事應該已經由人類
+（透過 Claude Code）用一次性 migration 腳本處理過，你只要確認表頭已經是上面新順序
+就好；如果表頭還是舊的，先回報人類，不要自己動手改表頭或搬移舊資料列，避免跟
+人類同時進行的 migration 互相打架。
 
 （`results.tsv` 不要進版控，保持 untracked，跟 autoresearch 的做法一樣，
 `.gitignore` 已經排除它。）
